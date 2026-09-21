@@ -3,11 +3,14 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal, Slot
 
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
     QPushButton, QTabWidget, QVBoxLayout, QWidget, QProgressBar, QCheckBox
 )
 
+from app.domains.migration.application.ports import (
+    BackupPort, DatabasePort, MigrationParserPort,
+)
 from app.domains.migration.application.use_cases import (
     ApproveMigrationUseCase, CreateProductionBackupUseCase,
     ResetTestDatabaseUseCase, RunFinalMigrationUseCase,
@@ -16,11 +19,9 @@ from app.domains.migration.application.use_cases import (
 from app.domains.migration.domain.enums import Environment
 from app.domains.migration.domain.enums import MigrationStatus
 from app.domains.migration.domain.models import DatabaseConfig
-from app.shared.database.backup import MySqlDumpBackupProvider
-from app.shared.database.mysql_client import MySqlClient
 from app.shared.filesystem.history import LocalHistoryRepository
 from app.shared.hashing.sha256 import sha256_file
-from app.shared.sql.parser import SqlMigrationParser
+from .history_tab import HistoryTab
 from .workers import Worker
 
 
@@ -29,17 +30,23 @@ from app import config
 class MainWindow(QMainWindow):
     worker_progress = Signal(object, object, str, int, int)
 
-    def __init__(self):
+    def __init__(
+        self,
+        db: DatabasePort,
+        backup_provider: BackupPort,
+        history: LocalHistoryRepository,
+        parser: MigrationParserPort,
+    ) -> None:
         super().__init__()
 
         self.worker_progress.connect(self._handle_worker_progress)
         self.setWindowTitle("Khanza Migrator")
         self.resize(1100, 720)
 
-        self.db = MySqlClient()
-        self.backup_provider = MySqlDumpBackupProvider()
-        self.history = LocalHistoryRepository()
-        self.parser = SqlMigrationParser()
+        self.db = db
+        self.backup_provider = backup_provider
+        self.history = history
+        self.parser = parser
 
         self.last_pre_result = None
         self.last_backup = None
@@ -49,7 +56,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._pre_tab(), "Pre-Migration")
         self.tabs.addTab(self._final_tab(), "Final Migration")
-        self.tabs.addTab(self._history_tab(), "History")
+        self.tabs.addTab(HistoryTab(self.history), "History")
         self.setCentralWidget(self.tabs)
 
         self._update_final_state()
@@ -178,41 +185,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.final_log, 1)
 
         return page
-
-    def _history_tab(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        path = self.history.root
-        label = QLabel(
-            f"History lokal:\n{path}\n\n"
-            "Setiap execution menyimpan migration.sql, result.json, dan metadata.json."
-        )
-        label.setWordWrap(True)
-        layout.addWidget(label)
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(lambda: self._show_history())
-        layout.addWidget(refresh)
-        self.history_text = QPlainTextEdit()
-        self.history_text.setReadOnly(True)
-        layout.addWidget(self.history_text, 1)
-        self._show_history()
-        return page
-
-    def _show_history(self):
-        entries = sorted(self.history.root.rglob("result.json"), reverse=True)
-        lines = []
-        for item in entries[:100]:
-            lines.append(str(item))
-            try:
-                import json
-                data = json.loads(item.read_text(encoding="utf-8"))
-                lines.append(
-                    f"  {data['status']} | {data['database']} | "
-                    f"success={data['success_count']} failed={data['failed_count']}"
-                )
-            except Exception:
-                pass
-        self.history_text.setPlainText("\n".join(lines) or "Belum ada execution history.")
 
     def _browse_file(self, target: QLineEdit, filter_text: str):
         path, _ = QFileDialog.getOpenFileName(self, "Pilih file", "", filter_text)
@@ -777,12 +749,3 @@ class MainWindow(QMainWindow):
         if progress_bar and total:
             progress_bar.setMaximum(total)
             progress_bar.setValue(current)
-
-
-def run_app():
-    from app.shared.logging.logger import configure_logging
-    configure_logging()
-    app = QApplication([])
-    window = MainWindow()
-    window.show()
-    app.exec()
