@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Application runtime
+*.log
+
+# Local migration history
+history/
+
+# Local configuration
+config/*.local
+config/*.json
+
+# Backups
+*.sql
+*.sql.gz
+*.dump
+
+# Build / distribution
+build/
+dist/
+*.egg-info/
+
+# PyInstaller
+*.spec
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary
+tmp/
+temp/
+*.tmp

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "khanza-migrator"
+version = "0.1.0"
+description = "Khanza database migration testing and production execution tool"
+requires-python = ">=3.11"
+dependencies = ["PySide6>=6.7,<7"]
+
+[project.scripts]
+khanza-migrator = "app.cli:main"
