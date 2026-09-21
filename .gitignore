@@ -53,3 +53,5 @@ htmlcov/
 tmp/
 temp/
 *.tmp
+
+.obsidian/

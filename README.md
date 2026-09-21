@@ -26,8 +26,8 @@ Automatic rollback tidak digunakan sebagai mekanisme utama karena DDL MySQL/Mari
 
 ## Requirement
 
-- Python 3.11+
-- PySide6
+- Python 3.10+ (sumber acuan: `project.requires-python` di `pyproject.toml`)
+- PySide6 dan python-dotenv (diinstal otomatis melalui package)
 - MySQL/MariaDB client:
   - `mysql`
   - `mysqldump`
@@ -37,11 +37,27 @@ Automatic rollback tidak digunakan sebagai mekanisme utama karena DDL MySQL/Mari
 
 ## Instalasi
 
+Jalankan dari root repository. `pyproject.toml` menjadi sumber acuan versi Python
+dan dependency; `requirements.txt` merujuk ke package lokal yang sama.
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+
+Perintah instalasi runtime di atas setara dengan `python -m pip install .`.
+Untuk development dan test, gunakan extra `dev` (termasuk runtime dependency):
+
+```bash
+python -m pip install -e '.[dev]'
+python -m pytest -q
+```
+
+`pytest` hanya merupakan dependency development/test. Baseline test menggunakan
+stub port dan direktori sementara; tidak memerlukan GUI atau MySQL sungguhan.
+Python 3.10 dipilih karena source memakai union type `X | None` dan dependency
+yang dideklarasikan mendukung versi tersebut; tidak ada kebutuhan source khusus 3.11.
 
 Jalankan GUI:
 
