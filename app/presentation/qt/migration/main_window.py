@@ -1,7 +1,9 @@
 from PySide6.QtCore import QThread, Signal, Slot
+from PySide6.QtGui import QCloseEvent
 
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QTabWidget
 
+from app.domains.migration.application.resumable_pre_migration import ResumablePreMigration
 from app.domains.migration.application.ports import (
     BackupPort, DatabasePort, MigrationParserPort,
 )
@@ -21,6 +23,7 @@ class MainWindow(QMainWindow):
         backup_provider: BackupPort,
         history: LocalHistoryRepository,
         parser: MigrationParserPort,
+        pre_migration: ResumablePreMigration,
     ) -> None:
         super().__init__()
 
@@ -37,6 +40,7 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.pre_tab = PreMigrationTab(
+            pre_migration=pre_migration,
             db=self.db,
             history=self.history,
             parser=self.parser,
@@ -58,6 +62,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
 
         self._update_final_state()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._active_threads:
+            QMessageBox.warning(self, "Operasi berjalan", "Tunggu operasi selesai sebelum menutup aplikasi.")
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _set_final_migration(self, path: str) -> None:
         self.final_tab._set_final_migration(path)

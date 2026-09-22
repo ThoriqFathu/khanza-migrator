@@ -85,9 +85,31 @@ Connection profile di GUI disimpan sebagai metadata lokal tanpa password. Passwo
 4. Test connection.
 5. Reset Test Database.
 6. Run Migration.
-7. Jika gagal, perbaiki migration SQL.
-8. Reset test database dan ulangi.
-9. Jika berhasil, Approve.
+7. Jika gagal, SQL yang sudah sukses ditampilkan sebagai bagian terkunci. Perbaiki
+   statement gagal dan sisa SQL pada editor **SQL yang belum selesai**.
+8. Klik **Lanjutkan Migration**. Statement yang sukses sebelumnya tidak diulang.
+   Jangan reset/mengubah database TEST di luar aplikasi selama sesi berlangsung.
+9. Setelah semua statement berhasil, aplikasi membuat `migration_final.sql` lengkap
+   di `~/.khanza-migrator/sessions/<id>/`. Path tampil di tab Pre dan otomatis
+   diteruskan ke tab Final. File input asli tidak ditimpa.
+10. Klik **Approve for Final Migration**; approval menggunakan hash file hasil tersebut.
+
+Resume tersedia selama aplikasi tetap terbuka. Catatan SQL sukses disimpan per
+statement di `session.json` pada folder sesi tanpa password; belum ada fitur membuka
+kembali sesi setelah restart. **Reset Test Database** membatalkan sesi dan memulai
+pengujian berikutnya dari awal. Selama run/reset, input aplikasi dikunci dan penutupan
+window ditolak sampai worker selesai.
+
+Statement yang mengembalikan error mungkin sudah mengubah sebagian data. Sesuaikan
+SQL tersisa dengan kondisi TEST; file final hanya berisi statement yang dilaporkan
+berhasil. Untuk memastikan hasil dapat direproduksi dari kondisi awal production,
+uji `migration_final.sql` pada TEST yang dipulihkan dari backup sebelum digunakan
+pada production, terutama jika pernah terjadi efek parsial. Jika pencatatan terputus
+saat SQL berjalan, sesi diblokir dari resume otomatis dan perlu reset TEST.
+
+SQL hasil memakai `DELIMITER` agar batas statement (termasuk routine dan semicolon
+di string) tetap utuh. Output masih melewati approval, production backup, dan
+pre-flight existing; pembuatan file tidak otomatis menjalankan production.
 
 ## Final Migration
 

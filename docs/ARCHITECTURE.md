@@ -1,110 +1,124 @@
 # Arsitektur dan Panduan Pengembangan Khanza Migrator
 
-Dokumen ini berdasarkan pembacaan source repository pada 21 September 2026. Catatan instalasi diperbarui pada Tahap 2 roadmap. Bagian 1–10 menjelaskan implementasi yang ada; bagian 11–13 adalah panduan penambahan fitur; bagian 14 adalah temuan analisis statis; bagian 15–16 adalah usulan struktur yang **belum diimplementasikan**, sedangkan bagian 17 mencatat roadmap dan tahap yang sudah dikerjakan. Semua path relatif terhadap root repository.
+Diperbarui berdasarkan source repository pada **23 September 2026**. Semua path relatif terhadap root repository. Bagian 1–10 menjelaskan implementasi saat ini; bagian 11–13 panduan pengembangan; bagian 14 masalah yang masih ada; bagian 15–17 rekomendasi dan status roadmap.
 
-Analisis awal tidak menjalankan GUI, koneksi database, migration, atau backup. Verifikasi Tahap 2 dibatasi pada instalasi, baseline test, import, dan startup Qt offscreen terisolasi tanpa operasi database. Perilaku runtime lainnya yang belum diverifikasi tetap disebut sebagai risiko. Source aplikasi tidak diubah.
+Dokumen ini juga mencakup fitur resume Pre-Migration: editor SQL tersisa, checkpoint sukses, dan export migration_final.sql. Pengujian fitur menggunakan fake database serta Qt offscreen; tidak menjalankan MySQL atau migration pada database sungguhan.
 
 ## 1. Overview
 
-Khanza Migrator merupakan aplikasi desktop PySide6 untuk mencoba SQL migration pada database TEST, menyimpan approval, membuat backup PRODUCTION, lalu menjalankan migration final. Aplikasi menerima SQL dari luar; tidak menghasilkan migration SQL.
+Khanza Migrator menerima SQL migration dari luar, mengujinya pada database TEST, menyimpan approval, membuat backup PRODUCTION, lalu menjalankan migration final. Aplikasi tidak menghasilkan migration SQL dan tidak melakukan automatic rollback/restore ketika migration gagal.
 
-Arsitektur existing memisahkan model domain, use case, dan UI, dengan adapter teknis di `app/shared/`. Pemisahan belum menyeluruh: `MainWindow` juga merakit dependensi, membaca filesystem, mengelola state lintas tab, dan mengatur thread.
+Saat ini startup dan pembuatan dependency sudah dipisahkan dari UI. `MainWindow` mendaftarkan tiga class tab, meneruskan callback antar-tab, dan masih mengelola QThread/worker. Widget, handler, dan state migration berada di masing-masing tab. Adapter teknis masih berada di `app/shared/`.
 
-Urutan baca yang disarankan:
+Urutan baca untuk belajar codebase:
 
-1. `app/main.py` → `run_app()` dan `MainWindow.__init__()` di `app/presentation/qt/migration/main_window.py`.
-2. `MainWindow._pre_tab()` → `_run_pre()` → `_run_worker()`.
-3. `Worker.run()` di `app/presentation/qt/migration/workers.py`.
-4. `RunMigrationUseCase.execute()` di `app/domains/migration/application/use_cases.py`.
-5. Kontrak di `app/domains/migration/application/ports.py`, model di `app/domains/migration/domain/models.py`, lalu adapter di `app/shared/`.
+1. `app/main.py` → `app/presentation/qt/app.py:run_app()`.
+2. `app/bootstrap.py:create_main_window()` → `app/presentation/qt/migration/main_window.py:MainWindow.__init__()`.
+3. `app/presentation/qt/migration/pre_migration_tab.py:PreMigrationTab._run_pre()` → callback `MainWindow._run_worker()`.
+4. `app/presentation/qt/migration/workers.py:Worker.run()` → `app/domains/migration/application/resumable_pre_migration.py:ResumablePreMigration.run()` untuk Pre; runner production tetap `RunMigrationUseCase.execute()`.
+5. `app/domains/migration/application/ports.py`, model domain, lalu adapter di `app/shared/`.
 
-Tidak ditemukan class `MigrationService`, class tab tersendiri, custom `QDialog`, registry tab, atau dependency injection framework. Unit orchestration aplikasi saat ini adalah class `*UseCase` dengan method `execute()`.
+Tidak ada dependency injection framework, registry tab, `TaskRunner`, custom `QDialog`, atau class `MigrationService`. Orchestration aplikasi memakai class `*UseCase` dengan method `execute()`.
 
 ## 2. Application Entry Point
 
 | Jalur | File/simbol | Perilaku |
 | --- | --- | --- |
-| GUI: `python -m app.main` | `app/main.py`, blok `if __name__ == "__main__"` | Memanggil `run_app()` yang diimpor dari module UI |
-| CLI: `python -m app.cli` | `app/cli.py`, `main()` | `argparse` memilih subcommand `hash` atau `parse`; keluar melalui `SystemExit(main())` |
-| CLI setelah instalasi package | `pyproject.toml`, `[project.scripts]` | `khanza-migrator = "app.cli:main"`; command ini bukan launcher GUI |
+| GUI: `python -m app.main` | `app/main.py`, blok `__main__` | Memanggil `run_app()` dari `app/presentation/qt/app.py` |
+| CLI: `python -m app.cli` | `app/cli.py:main()` | Subcommand `hash` dan `parse`; keluar melalui `SystemExit(main())` |
+| CLI setelah instalasi | `pyproject.toml:[project.scripts]` | `khanza-migrator = "app.cli:main"`; bukan launcher GUI |
 
-`app/cli.py:main()` langsung menggunakan `sha256_file()` atau `SqlMigrationParser.parse_file()`. CLI tidak membuat `MainWindow`, tidak mengimpor konfigurasi GUI, dan belum menyediakan reset, approval, backup, atau eksekusi migration.
+CLI langsung menggunakan `app/shared/hashing/sha256.py:sha256_file()` atau `app/shared/sql/parser.py:SqlMigrationParser.parse_file()`. CLI belum menyediakan workflow reset, approval, backup, atau eksekusi migration.
 
-Dependensi yang ditemukan:
+`pyproject.toml` adalah sumber acuan instalasi:
 
-- `pyproject.toml` adalah sumber acuan runtime dependency: `PySide6>=6.7,<7` dan `python-dotenv>=1.2,<2`. `app/config.py` mengimpor `dotenv.load_dotenv`; dependency ini sudah dideklarasikan pada Tahap 2.
-- `requirements.txt` merujuk ke package lokal (`.`), sehingga `python -m pip install -r requirements.txt` dari root repository menggunakan metadata yang sama dengan `python -m pip install .`.
-- `app/shared/database/mysql_client.py:MySqlClient` menjalankan executable `mysql`; `app/shared/database/backup.py:MySqlDumpBackupProvider` menjalankan `mysqldump`. Tidak ditemukan driver koneksi Python atau ORM.
-- Minimum Python ditetapkan pada `project.requires-python = ">=3.10"` di `pyproject.toml`; README dan AGENTS merujuk ke sana. Source menggunakan union type `X | None` (Python 3.10), tidak ditemukan API khusus 3.11. Metadata dependency yang diperiksa mendukung 3.10: PySide6 6.11.2, python-dotenv 1.2.3, dan pytest 9.1.1. Baseline juga telah dijalankan pada Python 3.10.12. Ini alasan teknis menyesuaikan batas metadata lama `>=3.11`, bukan perubahan behavior source.
-- Test menggunakan pytest, termasuk fixture `tmp_path`. Extra `dev` di `pyproject.toml` mendeklarasikan `pytest>=9,<10`, terpisah dari runtime dependency. Instalasi development: `python -m pip install -e '.[dev]'` dari root repository; jalankan `python -m pytest -q`.
+- Minimum Python `>=3.10`. Source menggunakan union type `X | None`; tidak ditemukan kebutuhan khusus Python 3.11. Verifikasi Tahap 2 berhasil pada Python 3.10.12 dengan dependency yang kompatibel.
+- Runtime: `PySide6>=6.7,<7` dan `python-dotenv>=1.2,<2`. `app/config.py` mengimpor `dotenv.load_dotenv`.
+- Development/test: extra `dev` berisi `pytest>=9,<10`.
+- `requirements.txt` berisi referensi package lokal `.`. Dari root repository, `python -m pip install -r requirements.txt` setara dengan `python -m pip install .`.
+- Development: `python -m pip install -e '.[dev]'`; test: `python -m pytest -q`.
+- Operasi database memerlukan executable `mysql` dan `mysqldump`. Tidak ditemukan ORM atau driver koneksi MySQL Python.
 
 ## 3. Startup Flow
 
-1. `app/main.py` mengimpor `run_app()` dari `app/presentation/qt/migration/main_window.py`.
-2. Import module UI ikut mengimpor `app/config.py`. Pada level module, `load_dotenv(BASE_DIR / ".env")` membaca konfigurasi; `env()` dan `env_int()` membentuk konstanta `PRE_*` dan `FINAL_*`. Parsing port terjadi saat import, sehingga nilai integer yang invalid dapat menggagalkan startup.
-3. `run_app()` memanggil `app/shared/logging/logger.py:configure_logging()`: membuat `~/.khanza-migrator/logs/` dan menyiapkan `application.log` serta stream handler.
-4. `run_app()` membuat `QApplication([])`, kemudian `MainWindow()`.
-5. `MainWindow.__init__()` menghubungkan signal progress, mengatur judul/ukuran, membuat empat adapter, menginisialisasi `last_pre_result`, `last_backup`, dan `_active_threads`.
-6. `LocalHistoryRepository.__init__()` membuat direktori history lokal jika belum ada.
-7. Ketiga tab dibangun dan didaftarkan secara eager. `_history_tab()` langsung memanggil `_show_history()`.
-8. Setelah `setCentralWidget(self.tabs)`, `_update_final_state()` membaca approval, menghitung hash bila sesuai, dan menonaktifkan tombol final execution.
-9. `run_app()` memanggil `window.show()` lalu `app.exec()` untuk event loop Qt.
+1. `app/main.py` mengimpor `app/presentation/qt/app.py:run_app()`.
+2. Import berlanjut melalui bootstrap, `MainWindow`, dan module tab. Module tab mengimpor `app/config.py`, yang memanggil `load_dotenv(BASE_DIR / ".env")` dan membentuk konstanta `PRE_*`/`FINAL_*` melalui `env()` dan `env_int()`. Port invalid dapat gagal saat import.
+3. `run_app()` memanggil `app/shared/logging/logger.py:configure_logging()`, membuat log di `~/.khanza-migrator/logs/application.log`.
+4. `run_app()` membuat `QApplication([])`, baru memanggil `app/bootstrap.py:create_main_window()`.
+5. Bootstrap membuat satu `MySqlClient`, `MySqlDumpBackupProvider`, `LocalHistoryRepository`, dan `SqlMigrationParser`, lalu mengirimkannya sebagai argument constructor `MainWindow`.
+6. `LocalHistoryRepository.__init__()` membuat direktori history bila belum ada. `MainWindow.__init__()` menyimpan dependency, menghubungkan progress signal, dan menginisialisasi `_active_threads`.
+7. `MainWindow` membuat `PreMigrationTab`, `FinalMigrationTab`, dan `HistoryTab` secara eager, lalu mendaftarkannya ke `QTabWidget`. History langsung dimuat oleh `HistoryTab.__init__()`.
+8. Setelah `setCentralWidget()`, `MainWindow._update_final_state()` meneruskan panggilan ke `FinalMigrationTab._update_final_state()`. Method ini membaca approval/hash dan menonaktifkan tombol eksekusi final.
+9. `run_app()` memanggil `window.show()` lalu `app.exec()`.
 
 ```mermaid
 flowchart TD
-    A["app/main.py: __main__"] --> B["main_window.py: run_app()"]
-    I["Import main_window.py"] --> C["app/config.py: load_dotenv(), env(), env_int()"]
-    B --> L["logger.py: configure_logging()"]
-    B --> Q["QApplication([])"]
-    B --> M["MainWindow.__init__()"]
-    M --> D["MySqlClient / MySqlDumpBackupProvider / LocalHistoryRepository / SqlMigrationParser"]
-    M --> T["_pre_tab() / _final_tab() / _history_tab()"]
-    T --> H["_history_tab(): _show_history()"]
-    M --> S["_update_final_state()"]
-    B --> E["window.show() lalu app.exec()"]
+    Entry["app/main.py"] --> Qt["presentation/qt/app.py: run_app()"]
+    Qt --> Log["configure_logging()"]
+    Qt --> App["QApplication([])"]
+    Qt --> Boot["bootstrap.py: create_main_window()"]
+    Boot --> Deps["MySqlClient / MySqlDumpBackupProvider / LocalHistoryRepository / SqlMigrationParser"]
+    Boot --> Window["MainWindow(dependency)"]
+    Window --> Pre["PreMigrationTab"]
+    Window --> Final["FinalMigrationTab"]
+    Window --> History["HistoryTab"]
+    History --> Load["_show_history()"]
+    Window --> State["FinalMigrationTab._update_final_state()"]
+    Qt --> Loop["window.show() lalu app.exec()"]
 ```
 
-Diagram memisahkan efek import dari pemanggilan `run_app()`. Logging/history memiliki efek tulis ketika aplikasi dijalankan; pemeriksaan startup harus mengarahkannya ke direktori sementara, bukan data pengguna.
+`run_app()` tidak lagi berada di `main_window.py`. `MainWindow()` tanpa dependency bukan cara konstruksi existing; gunakan bootstrap setelah `QApplication` tersedia. Bootstrap juga membuat `ResumablePreMigration(parser, db, history, LocalSessionRepository())`, menginjeksi MainWindow lalu PreMigrationTab. Use case production/reset/approval masih dibuat oleh handler tab saat diperlukan.
 
 ## 4. Project Directory Structure
 
-Struktur source yang ditemukan; file `__init__.py` kosong tidak ditampilkan:
+Struktur source saat ini; file `__init__.py` tidak ditampilkan:
 
 ```text
 app/
 ├── main.py
 ├── cli.py
+├── bootstrap.py
 ├── config.py
-├── domains/
+├── domains/migration/
+│   ├── domain/
+│   │   ├── enums.py
+│   │   ├── models.py
+│   │   └── session.py
+│   └── application/
+│       ├── ports.py
+│       ├── use_cases.py
+│       ├── resumable_pre_migration.py
+│       └── session_ports.py
+├── presentation/qt/
+│   ├── app.py
 │   └── migration/
-│       ├── domain/
-│       │   ├── enums.py
-│       │   └── models.py
-│       └── application/
-│           ├── ports.py
-│           └── use_cases.py
-├── presentation/
-│   └── qt/
-│       └── migration/
-│           ├── main_window.py
-│           └── workers.py
+│       ├── main_window.py
+│       ├── pre_migration_tab.py
+│       ├── final_migration_tab.py
+│       ├── history_tab.py
+│       └── workers.py
 └── shared/
     ├── database/
     │   ├── mysql_client.py
     │   └── backup.py
-    ├── filesystem/history.py
+    ├── filesystem/
+    │   ├── history.py
+    │   └── sessions.py
     ├── hashing/sha256.py
     ├── logging/logger.py
-    └── sql/parser.py
+    └── sql/
+        ├── parser.py
+        └── render.py
 tests/
 ├── conftest.py
 ├── test_hash.py
-├── test_history_repository.py
-├── test_migration_use_cases.py
 ├── test_parser.py
-└── test_safety.py
-docs/
-└── ARCHITECTURE.md
+├── test_safety.py
+├── test_migration_use_cases.py
+├── test_history_repository.py
+├── test_resumable_pre_migration.py
+└── test_pre_migration_resume_ui.py
+docs/ARCHITECTURE.md
 pyproject.toml
 requirements.txt
 README.md
@@ -112,364 +126,348 @@ AGENTS.md
 .env.example
 ```
 
-`app/application/`, `app/infrastructure/`, dan `app/domains/migration/infrastructure/` belum ada. Tree pada README menyebut infrastructure di bawah migration, tetapi adapter aktual berada di `app/shared/`. Arahan layer pada `AGENTS.md` adalah pedoman pengembangan, bukan gambaran persis struktur existing. Worker aktual berada di `app/presentation/qt/migration/workers.py`, sementara pedoman menyarankan `app/presentation/qt/workers/`.
+`app/application/`, `app/infrastructure/`, `app/domains/migration/infrastructure/`, `presentation/qt/workers/`, dan subfolder `tabs/` belum ada. Ketiga class tab berada langsung di `app/presentation/qt/migration/`. Pedoman AGENTS dan struktur usulan bukan bukti bahwa directory tersebut sudah diimplementasikan.
 
 ## 5. Layer Responsibilities
 
-| Area                                             | Class/function utama                                               | Tanggung jawab dan dependensi                                                                                                                       |
-| ------------------------------------------------ | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `app/domains/migration/domain/`                  | Dataclass pada `models.py`; enum pada `enums.py`                   | Data migration, environment, hasil, approval, backup, safety report. Hanya bergantung pada standard library dan enum lokal; tidak mengimpor PySide6 |
-| `app/domains/migration/application/use_cases.py` | Enam class `*UseCase.execute()`                                    | Mengurutkan operasi dan memeriksa prasyarat. Menggunakan model, port, dan helper konkret `sha256_file()`                                            |
-| `app/domains/migration/application/ports.py`     | `MigrationParserPort`, `DatabasePort`, `BackupPort`, `HistoryPort` | Kontrak `typing.Protocol` yang dibutuhkan use case; implementasi dapat memenuhi kontrak tanpa mewarisinya                                           |
-| `app/shared/database/`                           | `MySqlClient`, `MySqlDumpBackupProvider`                           | Adapter subprocess MySQL dan mysqldump                                                                                                              |
-| `app/shared/filesystem/history.py`               | `LocalHistoryRepository`                                           | Menyimpan execution/approval sebagai file lokal                                                                                                     |
-| `app/shared/sql/parser.py`                       | `SqlMigrationParser`                                               | Memecah SQL dan menghasilkan model `MigrationStatement`                                                                                             |
-| `app/shared/hashing/sha256.py`                   | `sha256_file()`                                                    | Hash file secara chunk                                                                                                                              |
-| `app/shared/logging/logger.py`                   | `configure_logging()`                                              | Konfigurasi logging runtime                                                                                                                         |
-| `app/presentation/qt/migration/`                 | `MainWindow`, `Worker`                                             | Widget, event handler, pesan, thread dan progress; juga composition/dependency wiring saat ini                                                      |
-| `app/config.py`                                  | `env()`, `env_int()`, konstanta                                    | Default input GUI dari environment/.env                                                                                                             |
+| Area | Komponen | Tanggung jawab |
+| --- | --- | --- |
+| `app/bootstrap.py` | `create_main_window()` | Composition root: membuat adapter konkret dan menginjeksi window |
+| `app/presentation/qt/app.py` | `run_app()` | Logging startup, QApplication, show, event loop |
+| `app/presentation/qt/migration/main_window.py` | `MainWindow` | Registrasi tab, penghubung Pre → Final, ownership worker/thread |
+| `app/presentation/qt/migration/*_tab.py` | `PreMigrationTab`, `FinalMigrationTab`, `HistoryTab` | Form, dialog, handler, state dan rendering milik tab |
+| `app/domains/migration/application/use_cases.py` | Enam class `*UseCase` | Workflow dan validasi prasyarat, tanpa Qt |
+| `app/domains/migration/application/ports.py` | `DatabasePort`, `BackupPort`, `HistoryPort`, `MigrationParserPort` | Kontrak `typing.Protocol`, dipenuhi adapter secara struktural |
+| `app/domains/migration/domain/` | Dataclass dan enum | Data migration, hasil, approval, backup, safety report; tanpa PySide6 |
+| `app/shared/` | Adapter database/parser/history, hash/logging | Implementasi I/O dan utilitas teknis |
+| `app/config.py` | `env()`, `env_int()`, konstanta | Default form dari environment/.env |
 
-Nama `shared` tidak berarti seluruh isinya generik: parser, history, database, dan backup mengimpor model migration. `MySqlClient` juga menggunakan `ProgressCallback` dari application port.
+`MainWindow` menerima database/backup/parser bertipe port, tetapi history bertipe `LocalHistoryRepository`. `HistoryTab` membutuhkan `root` dan `approval_file` yang tidak tercantum di `HistoryPort`; Pre/Final menerima `HistoryPort`. Instance repository yang sama diteruskan ke semua tab.
 
-```mermaid
-flowchart LR
-    UI["MainWindow"] --> UC["application/use_cases.py"]
-    UI --> AD["app/shared: adapter konkret"]
-    UI --> DM["domain/models.py dan enums.py"]
-    UC --> P["application/ports.py: Protocol"]
-    UC --> DM
-    UC --> HASH["shared/hashing/sha256.py"]
-    P --> DM
-    AD --> DM
-    DB["MySqlClient"] --> P
-```
-
-Panah menunjukkan ketergantungan kode, bukan inheritance. Domain tidak bergantung balik pada UI atau adapter.
+`shared` belum sepenuhnya generik: adapter mengimpor model migration, dan `MySqlClient` menggunakan `ProgressCallback` dari application port. Use case juga langsung menggunakan helper `sha256_file()`.
 
 ## 6. UI Architecture
 
-Semua UI utama berada pada `app/presentation/qt/migration/main_window.py:MainWindow(QMainWindow)`. `QTabWidget` menjadi central widget. Tampilan disusun dengan Python (`QVBoxLayout`, `QFormLayout`, `QHBoxLayout`); tidak ditemukan file Qt Designer `.ui` dalam source yang ditelusuri.
+`MainWindow` tidak lagi memiliki field `pre_*`, `final_*`, `history_text`, `last_pre_result`, atau `last_backup`. Kepemilikannya:
 
-Widget setiap tab disimpan sebagai atribut `MainWindow`, misalnya `pre_migration`, `pre_database`, `final_migration`, `safety_labels`, dan `history_text`. Handler dapat langsung mengakses widget tab lain. Konversi form ke domain dilakukan oleh `_pre_config()` dan `_final_config()` yang menghasilkan `DatabaseConfig`; password dikirim sebagai argumen terpisah.
-
-State bersama:
-
-| State | Penulis | Pembaca/penggunaan |
+| Komponen dan path | State/widget utama | Method utama |
 | --- | --- | --- |
-| `last_pre_result` | `_run_pre()` mereset, `_handle_pre_migration_result()` menyimpan | `_approve()` menggunakan hasil test terakhir |
-| `last_backup` | `_backup_finished()` | `_validate_final()` dan `_execute_final()` |
-| Approval persisten | `ApproveMigrationUseCase.execute()` → `LocalHistoryRepository.save_approval()` | `_update_final_state()` dan `ValidateFinalMigrationUseCase.execute()` |
-| `_active_threads` | `_run_worker()` dan closure `cleanup()` | Menahan referensi pasangan thread/worker selama operasi |
+| `pre_migration_tab.py:PreMigrationTab` | `pre_*`, `session`, `completed_sql`, `pending_sql`, `output_path`, `last_pre_result` | `_build_ui()`, `_pre_config()`, `_run_pre()`, `_approve()`, `migration_path()` |
+| `final_migration_tab.py:FinalMigrationTab` | `final_*`, `safety_labels`, `last_backup` | `_build_ui()`, `_final_config()`, `_validate_final()`, `_create_backup()`, `_execute_final()` |
+| `history_tab.py:HistoryTab` | `history_text`, repository | `_show_history()`, `_reset_all_data()` |
+| `main_window.py:MainWindow` | `tabs`, `pre_tab`, `final_tab`, `_active_threads`, dependency bersama | `_set_final_migration()`, `_update_final_state()`, `_run_worker()` |
 
-`_browse_file()` menyalin path pre-migration ke field final hanya ketika dialog pemilihan file berhasil dan targetnya `pre_migration`. Mengedit field secara manual tidak memiliki koneksi `textChanged` untuk sinkronisasi/invalidation. Nilai awal `PRE_MIGRATION_FILE` juga tidak langsung mengisi field final yang dibuat kosong.
+Semua path pada tabel berada di `app/presentation/qt/migration/`. Widget dibangun langsung dengan Python/layout Qt; tidak ada Qt Designer `.ui` atau custom dialog class pada struktur ini.
 
-## 7. Tab Lifecycle
+Komunikasi Pre → Final menggunakan callback biasa, bukan event bus:
 
-Ketiga tab dibuat sekali pada `MainWindow.__init__()`, dalam urutan berikut:
-
-| Label | Factory di `main_window.py:MainWindow` | Event handler utama |
+| Callback constructor | Nilai yang diinjeksi oleh `MainWindow` | Efek |
 | --- | --- | --- |
-| Pre-Migration | `_pre_tab()` → `QWidget` | `_test_pre_connection()`, `_reset_test()`, `_run_pre()`, `_approve()` |
-| Final Migration | `_final_tab()` → `QWidget` | `_validate_final()`, `_create_backup()`, `_execute_final()` |
-| History | `_history_tab()` → `QWidget` | `_show_history()` melalui tombol Refresh |
-
-Setiap factory membuat page, layout, widget, menghubungkan `button.clicked.connect(handler)`, lalu mengembalikan page. Registrasi dilakukan eksplisit: `self.tabs.addTab(self._pre_tab(), "Pre-Migration")`, dan pola sama untuk dua tab lainnya.
-
-Tidak ada discovery otomatis, lifecycle `on_enter`, lazy loading, atau handler `currentChanged`. Berpindah tab tidak membuat ulang page dan tidak otomatis merefresh history. `_show_history()` berjalan saat konstruksi History dan saat Refresh diklik. Method ini membaca seluruh path `result.json` melalui `rglob()`, mengurutkannya, lalu menampilkan maksimal 100 entry.
-
-Qt mengelola ownership page melalui widget tree. Kode belum menyediakan pelepasan/cancellation operasi saat menutup tab/window; tidak ditemukan override `closeEvent()`.
-
-## 8. Dialog Lifecycle
-
-Belum ada class dialog buatan sendiri. Semua dialog existing adalah pemanggilan statis `QFileDialog` atau `QMessageBox` di `app/presentation/qt/migration/main_window.py:MainWindow`.
-
-| Pemanggil | Dialog | Hasil dan kelanjutan |
-| --- | --- | --- |
-| `_browse_file()` | `QFileDialog.getOpenFileName()` | Path nonkosong mengubah field lalu `_update_final_state()`; cancel tidak mengubah field |
-| `_test_pre_connection()` | `QMessageBox.warning/question/critical` | Memvalidasi nama, menawarkan create database bila belum ada, atau menampilkan error |
-| `_reset_test()` | `QMessageBox.warning()` dengan Yes/No | Konfirmasi default No; hanya Yes memulai reset worker |
-| `_run_pre()` | `QMessageBox.warning()` | Menolak file migration yang tidak valid |
-| `_approve()` | `QMessageBox.warning/information/critical` | Menolak prasyarat, menampilkan keberhasilan atau exception approval |
-| `_validate_final()` | `QMessageBox.critical()` | Exception pre-flight ditampilkan dan method mengembalikan False |
-| `_create_backup()` | Warning, `getSaveFileName()`, lalu question overwrite | Path default berada di `~/khanza-migrator-backups/`; cancel/No menghentikan handler |
-| `_execute_final()` | `QMessageBox.warning()` Yes/No | Setelah pre-flight lolos, hanya Yes menjalankan final worker |
-| `_final_finished()` | `QMessageBox.information/critical` | Menampilkan hasil final |
-| `_run_worker()` | `worker.failed` → lambda → `QMessageBox.critical()` | Exception worker dilaporkan dengan judul Operasi gagal |
-
-Pemanggilan dialog meminta hasil sebelum handler melanjutkan. Dialog tidak menjalankan use case sendiri; orchestration tetap di `MainWindow`. Tidak ada dialog password terpisah: password sudah berupa `QLineEdit` dengan echo mode Password, diisi awal dari `app/config.py` bila tersedia.
-
-## 9. Application / Service Flow
-
-### Wiring dan kontrak
-
-`MainWindow.__init__()` membuat adapter; handler membuat use case sesuai kebutuhan. Semua class use case berikut berada di `app/domains/migration/application/use_cases.py` dan memiliki method publik `execute()`.
-
-| Use case | Dependensi constructor | Urutan utama |
-| --- | --- | --- |
-| `ResetTestDatabaseUseCase` | `DatabasePort` | Wajib TEST dan backup ada → test connection → cek/drop database → create → import → verify |
-| `RunMigrationUseCase` | `MigrationParserPort`, `DatabasePort`, `HistoryPort` | Cek file/environment → hash → parse → execute per statement → berhenti pada error pertama → simpan result |
-| `ApproveMigrationUseCase` | `HistoryPort` | Hasil wajib SUCCESS dan hash file sama → bentuk `Approval` → simpan |
-| `ValidateFinalMigrationUseCase` | `DatabasePort`, `HistoryPort` | Cek file, approval/hash, jumlah hasil pre, environment, koneksi, keberadaan metadata backup → `SafetyReport` |
-| `CreateProductionBackupUseCase` | `BackupPort` | Wajib PRODUCTION → hash migration → create backup → verify backup → metadata |
-| `RunFinalMigrationUseCase` | `RunMigrationUseCase`, `ValidateFinalMigrationUseCase` | Validasi ulang → `PermissionError` jika gagal → delegasi eksekusi migration |
-
-Tidak semua tombol melewati use case: `_test_pre_connection()` langsung memanggil `MySqlClient.database_exists()`, `create_database()`, dan `test_connection()`. `_show_history()` langsung membaca JSON, tanpa method query pada `HistoryPort`.
-
-### Contoh lengkap: Run Migration pada TEST
+| Pre `migration_selected` | `MainWindow._set_final_migration` | Meneruskan path ke `FinalMigrationTab._set_final_migration()` |
+| Pre `update_final_state` | `MainWindow._update_final_state` | Meneruskan ke `FinalMigrationTab._update_final_state()` |
+| Final `pre_migration_path` | `PreMigrationTab.migration_path` | Fallback path ketika field final kosong saat pembaruan status |
+| Pre/Final `run_worker` | `MainWindow._run_worker` | Dispatch background function dengan widget log/progress dan callback hasil |
 
 ```mermaid
 sequenceDiagram
-    participant U as MainWindow (_run_pre)
-    participant W as Worker.run (QThread)
-    participant C as RunMigrationUseCase.execute
-    participant P as SqlMigrationParser.parse_file
-    participant D as MySqlClient.execute
-    participant H as LocalHistoryRepository.save_execution
-    U->>U: Ambil Path, DatabaseConfig, password
-    U->>U: _run_worker(function, callback)
-    U->>W: thread.started → run()
-    W->>C: function(progress.emit)
-    C->>P: parse_file(migration_file)
-    P-->>C: list[MigrationStatement]
-    loop Sampai selesai atau error pertama
-        C-->>W: progress(message, current, total)
-        W-->>U: progress → worker_progress → _handle_worker_progress
-        C->>D: execute(config, password, statement.sql)
+    participant P as PreMigrationTab
+    participant M as MainWindow
+    participant F as FinalMigrationTab
+    P->>P: _browse_file(): pilih migration
+    P->>M: _migration_selected(path)
+    M->>F: _set_final_migration(path)
+    P->>M: _update_final_state()
+    M->>F: _update_final_state()
+    opt Field final kosong
+        F->>P: _pre_migration_path() = migration_path()
     end
-    C->>H: save_execution(result, migration_file)
-    C-->>W: MigrationExecutionResult
-    W-->>U: succeeded → _handle_pre_migration_result
-    W-->>U: finished → thread.quit / cleanup
 ```
 
-`RunMigrationUseCase.execute()` menangkap exception per statement menjadi `StatementResult(success=False)`. Maka signal `Worker.succeeded` berarti function kembali normal, **bukan** seluruh SQL berhasil. Callback UI wajib memeriksa `MigrationExecutionResult.status`. Exception di luar blok eksekusi statement, misalnya parsing atau penyimpanan history, mencapai `Worker.failed`.
+Pemilihan migration lewat Browse menyalin path ke Final. Browse backup hanya meminta pembaruan status. Edit path manual tidak melakukan sinkronisasi otomatis; tidak ada `textChanged` yang menginvalidasi backup. `FinalMigrationTab` tetap dibuat dengan field migration kosong meskipun konfigurasi PRE memiliki path awal.
 
-Callback aktif untuk pre-migration adalah `_handle_pre_migration_result()`. `_pre_finished()` masih ada, tetapi hanya direferensikan oleh versi `_run_pre()` yang dikomentari; jangan mempelajarinya sebagai jalur aktif. Callback aktif menyimpan hasil dan menampilkan error SQL, tetapi tidak memanggil `_update_final_state()` seperti callback lama.
+Approval tersimpan pada repository bersama. `_approve()` meminta update final setelah penyimpanan berhasil. Callback aktif Pre sekarang `_session_finished()`. Setelah seluruh SQL sukses, callback menampilkan output dan mengirim path `migration_final.sql` ke Final. Handler hasil pre lama telah diganti oleh alur sesi ini. Approval membaca file output dan metadata target/backup sesi, bukan file input awal.
 
-### Worker dan thread
+## 7. Tab Lifecycle
 
-`app/presentation/qt/migration/workers.py:Worker(QObject)` menerima callable `function`; `run()` memanggil `function(self.progress.emit)`, menerbitkan `succeeded(object)` atau `failed(str)`, dan selalu menerbitkan `finished()`.
+Registrasi dilakukan eksplisit di `app/presentation/qt/migration/main_window.py:MainWindow.__init__()`:
 
-`MainWindow._run_worker()` membuat `QThread(self)`, memindahkan worker dengan `moveToThread()`, dan menyimpan pasangan di `_active_threads`. Progress diteruskan melalui signal milik `MainWindow`, lalu diterima `_handle_worker_progress()` yang memiliki dekorator `@Slot` untuk memperbarui log/progress bar. Finish menghubungkan `thread.quit`, `worker.deleteLater`, cleanup referensi, serta `thread.deleteLater`.
+1. Buat `self.pre_tab = PreMigrationTab(...)`; `addTab(self.pre_tab, "Pre-Migration")`.
+2. Buat `self.final_tab = FinalMigrationTab(...)`; `addTab(self.final_tab, "Final Migration")`.
+3. `addTab(HistoryTab(self.history), "History")`.
 
-`busy_button` hanya digunakan oleh `_create_backup()` untuk menonaktifkan tombol backup selama operasi. Ini bukan pengunci global operasi migration.
+Pre/Final menyusun layout melalui `_build_ui()` yang dipanggil constructor. History menyusun layout langsung di `__init__()` dan memanggil `_show_history()`. Urutan ini membuat callback `pre_migration_path` tersedia saat Final dibuat; callback Pre yang meneruskan ke Final baru digunakan setelah konstruksi selesai.
 
-Reset, pre-migration, backup, dan eksekusi final memakai worker. Test connection dan pre-flight validation masih sinkron di GUI; approval, hash state, dan pembacaan history juga dilakukan di GUI. Pada `_execute_final()`, lambda worker masih membaca widget secara langsung; lihat bagian 14.
+Tidak ada lazy loading, registry, `currentChanged`, atau hook saat tab dibuka. Berpindah tab tidak membuat ulang widget atau otomatis merefresh history. Qt mengelola page melalui widget tree. `MainWindow.closeEvent()` menolak penutupan saat `_active_threads` tidak kosong. Run/resume/reset Pre juga menonaktifkan window selama operasi; mekanisme cancellation belum ada.
 
-### Adapter dan penyimpanan
+`HistoryTab._show_history()` membaca `root.rglob("result.json")`, mengurutkan path secara menurun, dan membatasi ke 100 file sebelum parsing. Setiap file menampilkan path, lalu ringkasan:
 
-- `app/shared/sql/parser.py:SqlMigrationParser.parse_file()` membaca UTF-8 dengan BOM, lalu `parse()` memecah statement dengan dukungan quote, comment dan DELIMITER dasar. `_detect_type()` mengelompokkan SQL; `_description()` mengekstrak deskripsi sederhana. Ini bukan semantic SQL parser.
-- `app/shared/database/mysql_client.py:MySqlClient.execute()` membuat proses `mysql --execute` baru untuk **setiap** statement. Tidak ada sesi/koneksi bersama antarstatement, sehingga state seperti session variable atau temporary table tidak boleh diasumsikan bertahan.
-- `MySqlClient.import_sql()` mengirim file langsung ke stdin satu proses mysql, menunggu proses selesai, dan menggunakan temporary file untuk stderr. Progress import berupa mulai/selesai, bukan persentase byte. `verify_database()` menguji koneksi dan jumlah tabel lebih dari nol.
-- `app/shared/database/backup.py:MySqlDumpBackupProvider.create_backup()` menjalankan mysqldump dengan routines/triggers/events dan `--databases`, menghasilkan `BackupMetadata`. `verify_backup()` memeriksa keberadaan, ukuran, dan SHA-256; tidak melakukan uji restore.
-- Kedua adapter database mengirim password lewat environment `MYSQL_PWD` pada child process, bukan argumen command line.
-- `app/shared/filesystem/history.py:LocalHistoryRepository.save_execution()` menyimpan `migration.sql`, `result.json`, dan `metadata.json` di `~/.khanza-migrator/history/<tahun>/<bulan>/migration_<timestamp>/`. `save_approval()` menyimpan satu approval di `~/.khanza-migrator/approval.json`; approval berikutnya menggantikannya.
-- `save_execution()` menerima parameter opsional `backup`, tetapi `RunMigrationUseCase.execute()` tidak mengirimkannya, termasuk saat dipanggil dari final use case. Karena itu metadata execution dari alur ini menyimpan `backup: null`.
+```text
+  SUCCESS | nama_database | success=3 failed=0
+```
 
-Tidak ada automatic rollback/restore di `RunMigrationUseCase` atau `RunFinalMigrationUseCase`. Eksekusi berhenti pada statement pertama yang gagal; statement sebelumnya mungkin sudah mengubah database.
+File JSON invalid atau field tidak lengkap tetap menyumbang baris path; exception parsing/formatting diabaikan. Jika tidak ada file: `Belum ada execution history.` Refresh dilakukan saat konstruksi, saat tombol Refresh diklik, dan setelah penghapusan data lokal berhasil.
+
+`HistoryTab._reset_all_data()` terhubung ke tombol **Hapus Semua Data**. Setelah konfirmasi Yes (default No), method menghapus isi `history.root`, isi `~/khanza-migrator-backups`, dan `history.approval_file`, kemudian merefresh History dan menampilkan hasil. Operasi memakai `shutil.rmtree()`/`Path.unlink()` langsung di UI; tidak memanggil MySQL. Folder root, log aplikasi, folder sesi resume (`~/.khanza-migrator/sessions`), dan backup yang disimpan di luar folder default tersebut tidak ikut dibersihkan oleh method ini. Belum ada callback ke Pre/Final untuk mereset state in-memory setelah penghapusan.
+
+## 8. Dialog Lifecycle
+
+Dialog existing berupa pemanggilan statis Qt; belum ada subclass `QDialog`. Parent dialog normal adalah tab yang memanggilnya, sedangkan error worker masih memakai parent `MainWindow`.
+
+| Pemanggil | Dialog dan alur |
+| --- | --- |
+| `PreMigrationTab._browse_file()`, `FinalMigrationTab._browse_file()` | `QFileDialog.getOpenFileName()`; path kosong berarti batal |
+| `PreMigrationTab._test_pre_connection()` | Warning input, question membuat database TEST bila belum ada, critical jika gagal |
+| `PreMigrationTab._reset_test()` | Warning Yes/No default No; Yes melanjutkan dispatch reset |
+| `PreMigrationTab._run_pre()`, `_approve()` | Warning prasyarat; approval juga information/critical |
+| `FinalMigrationTab._validate_final()` | Critical jika exception; mengembalikan False |
+| `FinalMigrationTab._create_backup()` | Warning prasyarat, `getSaveFileName()`, question overwrite bila file sudah ada |
+| `FinalMigrationTab._execute_final()` | Pre-flight lalu warning konfirmasi PRODUCTION; default No |
+| `FinalMigrationTab._final_finished()` | Information sukses atau critical gagal tanpa automatic restore |
+| `HistoryTab._reset_all_data()` | Warning penghapusan lokal, information berhasil, critical exception |
+| `MainWindow._run_worker()` | `worker.failed` → lambda → `QMessageBox.critical()` |
+
+Password bukan dialog tersendiri: Pre/Final memakai `QLineEdit` dengan echo mode Password dan default dari konfigurasi. Handler membaca nilai input lalu mengarahkan operasi ke use case/adapter.
+
+## 9. Application / Service Flow
+
+Use case existing berada di `app/domains/migration/application/use_cases.py`; alur resume Pre berada di `resumable_pre_migration.py`. Bootstrap membuat adapter dan service resume; tab masih membuat use case reset/approval/production sesuai aksi pengguna.
+
+| Use case | Dependency constructor | Alur `execute()` |
+| --- | --- | --- |
+| `ResetTestDatabaseUseCase` | `DatabasePort` | Wajib TEST, backup ada → connection → exists/drop → create → import → verify |
+| `RunMigrationUseCase` | Parser, database, history port | Hash/parse file → execute berurutan → stop pada error pertama → simpan hasil |
+| `ApproveMigrationUseCase` | `HistoryPort` | Wajib status SUCCESS dan hash sama → bentuk/simpan `Approval` |
+| `ValidateFinalMigrationUseCase` | Database/history port | File, approval/hash, count pre, environment, connection, metadata backup → `SafetyReport` |
+| `CreateProductionBackupUseCase` | `BackupPort` | Wajib PRODUCTION → hash migration → create backup → verify backup |
+| `RunFinalMigrationUseCase` | Runner dan validator use case | Validasi ulang → blokir bila gagal → delegasi runner |
+
+### Resume Pre-Migration
+
+`app/domains/migration/domain/session.py:PreMigrationSession` menyimpan target TEST,
+source/backup, SQL pending, hasil sukses, error terakhir, dan status in-flight.
+`app/domains/migration/application/resumable_pre_migration.py:ResumablePreMigration`
+menyediakan `start()`, `run()`, `invalidate()`, dan `result()`. Port session berada
+pada `application/session_ports.py`; adapter `app/shared/filesystem/sessions.py:LocalSessionRepository`
+menyimpan JSON secara atomic replace di `~/.khanza-migrator/sessions/<id>/`.
+Password tidak disimpan. Resume UI hanya tersedia selama aplikasi terbuka; belum
+ada aksi membuka sesi lama setelah restart.
+
+`run()` menandai in-flight sebelum SQL, menyimpan successful prefix setiap selesai,
+dan berhenti pada error pertama. Editor hanya mengganti pending tail; prefix tidak
+ikut dieksekusi ulang. Target berbeda, sesi invalidated, atau status in-flight yang
+tidak pasti ditolak. Reset TEST menginvalidasi sesi sebelum operasi reset.
+
+Setelah semua SQL berhasil, `app/shared/sql/render.py:render_statements()` membentuk
+`migration_final.sql` dengan delimiter yang tidak bertabrakan. Parser existing
+memeriksa round-trip statement; hasil agregat SUCCESS dan hash output dipakai oleh
+approval existing. Kegagalan export dapat dicoba lagi tanpa mengulang SQL sukses.
+File input asli tidak ditimpa. Checkpoint adalah catatan operasi, bukan bukti
+bahwa database tidak diubah oleh proses lain. SQL gagal dapat memiliki efek parsial;
+uji ulang output dari backup diperlukan untuk memastikan reproduksibilitas sebelum production.
+
+Alur pre-migration:
+
+```mermaid
+sequenceDiagram
+    participant P as PreMigrationTab
+    participant M as MainWindow
+    participant W as Worker
+    participant U as ResumablePreMigration
+    participant D as MySqlClient
+    participant H as LocalHistoryRepository
+    P->>P: _run_pre(): snapshot input dan editor SQL
+    P->>M: _run_worker(function, log, progress, callback)
+    M->>W: QThread.started → run()
+    W->>U: start/load sesi lalu run(..., progress.emit)
+    U->>U: parse pending; simpan checkpoint
+    loop SQL pending sampai selesai atau error pertama
+        U->>D: execute(config, password, sql)
+        U-->>W: progress
+        W-->>M: worker_progress → _handle_worker_progress
+    end
+    U->>H: save_execution(attempt atau hasil agregat)
+    U-->>W: PreMigrationSession
+    W-->>P: succeeded → _session_finished()
+    W-->>M: finished → quit / cleanup
+```
+
+`Worker.succeeded` berarti function kembali normal, bukan semua SQL berhasil. Exception per statement ditangkap runner menjadi hasil FAILED; callback harus memeriksa `result.status`. Pada runner production, error di luar blok statement mencapai `Worker.failed`. Pada Pre, wrapper operasi mengembalikan pasangan sesi/error agar `_session_finished()` tetap dapat menampilkan checkpoint sukses saat terjadi error parsing/history.
+
+`app/presentation/qt/migration/workers.py:Worker.run()` memanggil callable dengan `self.progress.emit`, mengirim succeeded/failed, dan selalu mengirim finished. `MainWindow._run_worker()` membuat QThread, menyimpan pasangan di `_active_threads`, menghubungkan progress melalui signal milik MainWindow, serta memasang quit/deleteLater/cleanup. Backup Final mengirim tombol backup sebagai `busy_button`; run/resume/reset Pre mengirim window agar interaksi terkunci selama pekerjaan. Operasi Final lain belum memiliki guard menyeluruh.
+
+Reset, pre-run, backup, dan final-run memakai worker. Test connection langsung menggunakan adapter dari `PreMigrationTab._test_pre_connection()`. Pre-flight, approval/hash, history read, dan penghapusan lokal masih sinkron di GUI. Lambda pada `FinalMigrationTab._execute_final()` masih membaca widget saat function worker dijalankan; ekstraksi tab belum memperbaikinya.
+
+Adapter dan persistence:
+
+- `app/shared/sql/parser.py:SqlMigrationParser.parse_file()` membaca UTF-8 BOM, lalu `parse()` memecah statement dengan quote/comment/DELIMITER dasar. `_detect_type()` dan `_description()` membuat klasifikasi/deskripsi; bukan semantic SQL parser.
+- `app/shared/database/mysql_client.py:MySqlClient.execute()` membuat proses `mysql --execute` baru per statement. State session SQL tidak dijamin bertahan antarstatement. `import_sql()` memasukkan file ke stdin satu proses dan menunggu selesai; progress mulai/selesai. `verify_database()` memeriksa koneksi dan jumlah tabel lebih dari nol.
+- `app/shared/database/backup.py:MySqlDumpBackupProvider.create_backup()` menggunakan mysqldump dengan routines/triggers/events dan `--databases`. `verify_backup()` memeriksa file/ukuran/SHA-256, bukan uji restore. Password dikirim melalui environment child process `MYSQL_PWD`.
+- `app/shared/filesystem/history.py:LocalHistoryRepository.save_execution()` menulis `migration.sql`, `result.json`, dan `metadata.json` ke `~/.khanza-migrator/history/<tahun>/<bulan>/migration_<timestamp>/`. `save_approval()` menyimpan satu `~/.khanza-migrator/approval.json`; `load_approval()` mengembalikan dataclass.
+- `save_execution()` menerima backup opsional, tetapi runner tidak mengirimkannya, termasuk alur final. Akibatnya metadata execution dari alur itu berisi `backup: null`.
 
 ## 10. Domain Layer
 
-Semua model berikut berada di `app/domains/migration/domain/models.py`:
+`app/domains/migration/domain/models.py` berisi:
 
-| Model | Peran |
+| Model | Tanggung jawab |
 | --- | --- |
-| `DatabaseConfig` | Host, port, database, username, `Environment`; password tidak disimpan di model |
-| `MigrationStatement` | Nomor urut, SQL, `StatementType`, deskripsi |
-| `StatementResult` | Keberhasilan, durasi, SQL, error code/message satu statement |
-| `MigrationExecutionResult` | Status, hash, target database, waktu, hasil statement; property `success_count`, `failed_count`, `failed_statement` |
-| `Approval` | Nama/hash migration, informasi test, jumlah hasil, waktu approval, versi aplikasi |
-| `BackupMetadata` | Target host/database, path/ukuran/hash backup, hash migration, waktu dan versi |
-| `SafetyCheck` | Nama, hasil boolean, detail satu pemeriksaan |
-| `SafetyReport` | List check; property `passed` menghitung `all(check.passed)` |
+| `DatabaseConfig` | Host, port, database, username, environment; password terpisah |
+| `MigrationStatement` | Urutan, SQL, tipe, deskripsi |
+| `StatementResult` | Keberhasilan, durasi, SQL, error satu statement |
+| `MigrationExecutionResult` | Status/hash/database/waktu/hasil; property `success_count`, `failed_count`, `failed_statement` |
+| `Approval` | Hash/nama migration, informasi test, count, waktu dan versi |
+| `BackupMetadata` | Target, file, ukuran/hash backup, hash migration, waktu dan versi |
+| `SafetyCheck` | Nama, hasil boolean, detail |
+| `SafetyReport` | List check; property `passed` memakai `all()` |
 
-`app/domains/migration/domain/enums.py` mendefinisikan `Environment`, `MigrationStatus`, dan `StatementType`. Tidak ada class state machine. Banyak nilai `MigrationStatus` disediakan, tetapi execution aktual menghasilkan SUCCESS/FAILED; teks UI seperti FINAL MIGRATION COMPLETED tidak otomatis berarti hasil persisten menggunakan enum COMPLETED.
-
-Model sebagian besar merupakan dataclass pembawa data. Validasi TEST/PRODUCTION, hash approval, dan prasyarat final berada di use case. Ini cukup wajar untuk ukuran aplikasi saat ini; tidak perlu memindahkan semua aturan ke domain hanya untuk mengikuti pola tertentu.
+`app/domains/migration/domain/enums.py` mendefinisikan `Environment`, `MigrationStatus`, dan `StatementType`. Domain tidak mengimpor PySide6. Model sebagian besar pembawa data; aturan workflow berada pada use case. Tidak ada state machine: hasil execution aktual SUCCESS/FAILED, sedangkan teks FINAL MIGRATION COMPLETED di UI tidak mengubah enum hasil menjadi COMPLETED.
 
 ## 11. How to Add a New Tab
 
-Panduan ini belum diterapkan. Contoh nama `InspectionTab` adalah ilustrasi komponen baru, bukan class existing.
+Contoh berikut adalah panduan, bukan class yang sudah ada:
 
-1. Buat `app/presentation/qt/migration/tabs/inspection_tab.py` berisi `InspectionTab(QWidget)` dengan `__init__()` untuk layout dan signal. Tambahkan package `tabs/__init__.py` bila mengikuti konvensi package repository.
-2. Berikan dependensi yang benar-benar dibutuhkan melalui constructor, misalnya use case inspeksi. Simpan widget milik tab pada class tersebut. Jangan memberikan seluruh `MainWindow` sebagai tempat mengambil semua state/dependensi.
-3. Ubah `app/presentation/qt/migration/main_window.py:MainWindow.__init__()` untuk import, membuat instance, dan memanggil `self.tabs.addTab(inspection_tab, "Inspection")`. Ini satu-satunya titik registrasi existing; tidak perlu registry/plugin framework.
-4. Hubungkan tombol ke handler class tab, misalnya `InspectionTab._inspect()`. Handler mengambil input widget di GUI thread, membentuk parameter biasa/dataclass, lalu memanggil use case melalui worker jika operasi lama.
-5. Untuk integrasi awal tanpa refactor global, `MainWindow` dapat menerima signal permintaan dari tab dan menjadi penghubung ke `_run_worker()`. Hasil diteruskan ke method tab seperti `show_result()`. Jangan menganggap shared `TaskRunner` sudah tersedia; itu usulan bagian 15.
-6. Jika tab memengaruhi final migration, kirim signal berisi data yang dibutuhkan dan buat invalidation state eksplisit. Hindari mengubah widget final langsung dari class tab baru.
+1. Buat `app/presentation/qt/migration/inspection_tab.py:InspectionTab(QWidget)`. Constructor menerima dependency/callback yang diperlukan dan membangun layout, mengikuti tab existing.
+2. Daftarkan instance melalui `MainWindow.__init__():self.tabs.addTab(...)` di `main_window.py`. Tidak perlu registry atau base-tab framework.
+3. Jika perlu adapter baru, buat wiring konkret pada `app/bootstrap.py:create_main_window()` lalu teruskan dependency melalui constructor MainWindow ke tab.
+4. Hubungkan tombol ke handler tab, misalnya `_inspect()`. Operasi lama memakai callback `run_worker` dari MainWindow, dengan hasil diarahkan ke method tab.
+5. Gunakan callback data terfokus untuk hubungan antar-tab, seperti `migration_path()` existing. Jangan mengirim seluruh MainWindow agar tab dapat mengambil semua widget/state.
+6. Ambil nilai widget sebelum menjalankan function worker untuk fitur baru. Pola final existing yang belum aman bukan pola yang perlu disalin.
 
-Alur tambahan yang disarankan: `MainWindow.__init__()` → `InspectionTab.__init__()` → tombol → `_inspect()` → worker/use case → hasil → `show_result()`. Untuk tab presentasi murni, domain/application baru tidak diperlukan. Pola existing berupa `_nama_tab()` dapat diikuti untuk perubahan sangat kecil, tetapi terus memperbesar `MainWindow` akan menambah masalah yang sudah ada.
+Tab presentasi murni tidak memerlukan domain/use case baru. Tab existing berada langsung di folder `migration/`; tidak perlu memindahkannya ke folder `tabs/` untuk menambah satu fitur.
 
 ## 12. How to Add a New Dialog
 
-Untuk konfirmasi sederhana, gunakan pola existing `QMessageBox` pada handler pemanggil. Untuk form atau dialog kompleks:
+Konfirmasi sederhana tetap dapat memakai `QMessageBox` pada handler tab. Untuk form kompleks, contoh usulan:
 
-1. Buat `app/presentation/qt/migration/dialogs/connection_dialog.py` dan package `dialogs/__init__.py`, dengan class usulan `ConnectionDialog(QDialog)`.
-2. `ConnectionDialog.__init__()` menyusun field dan tombol. Hubungkan aksi OK/Cancel ke `accept()`/`reject()`. Jika input belum valid, tampilkan masalah input dan jangan accept dulu.
-3. Sediakan method seperti `database_config() -> DatabaseConfig`; password tetap terpisah, sesuai kontrak existing. Dialog bertanggung jawab atas input/presentasi, bukan menjalankan subprocess database.
-4. Ubah handler pemanggil pada `main_window.py:MainWindow` atau class tab baru untuk membuat dialog dengan parent, memanggil `exec()`, memeriksa `QDialog.DialogCode.Accepted`, lalu mengambil data.
-5. Setelah accepted, handler menjalankan use case/worker. Cancel menghentikan alur tanpa operasi database. Jika dialog memang harus menampilkan operasi asinkron, gunakan signal/slot dan kepemilikan worker yang jelas.
+1. Buat `app/presentation/qt/migration/dialogs/connection_dialog.py:ConnectionDialog(QDialog)` beserta package bila diperlukan.
+2. `__init__()` menyusun input; OK/Cancel mengarah ke `accept()`/`reject()`. Validasi input dilakukan sebelum accept.
+3. Method seperti `database_config() -> DatabaseConfig` mengembalikan data biasa; password tetap terpisah.
+4. Handler pemanggil pada Pre/Final membuat dialog dengan parent tab, menjalankan `exec()`, memeriksa Accepted, lalu mengambil data untuk use case/worker.
+5. Dialog tidak memasukkan Qt ke application/domain. Operasi panjang tidak dijalankan sinkron hanya karena berada di dialog.
 
-Alur usulan: handler UI → `ConnectionDialog.exec()` → `accept()` → `database_config()` → use case. Class dan path ini belum ada. Domain/application tetap tidak boleh mengimpor `QDialog`, `QMessageBox`, atau widget lain.
+Path/class ini belum ada. Dialog baru hanya diperlukan jika kompleksitas form membutuhkannya; jangan membungkus semua message box dalam class baru.
 
 ## 13. How to Add a New Feature
 
-Contoh fitur kecil: preview statement tanpa eksekusi database.
+Contoh preview SQL tanpa eksekusi:
 
-| Kebutuhan | File/class yang mungkin dibuat atau diubah | Alur |
+| Kebutuhan | Lokasi usulan | Hubungan |
 | --- | --- | --- |
-| Orchestration preview | File baru `app/domains/migration/application/preview_migration.py`, class usulan `PreviewMigrationUseCase.execute(path)` | Gunakan `MigrationParserPort.parse_file()` dan kembalikan `list[MigrationStatement]`; tidak perlu DTO/port baru jika kontrak existing cukup |
-| Tampilan preview | Class tab/dialog baru di `app/presentation/qt/migration/` | Ambil path → use case di worker untuk file besar → render hasil |
-| Wiring | `main_window.py:MainWindow.__init__()`/handler | Suntikkan `SqlMigrationParser` existing; kelak pindah ke bootstrap yang diusulkan |
-| Test fitur | Misalnya `tests/test_preview_migration.py` | Fake parser untuk membuktikan hasil/error tanpa Qt atau database |
+| Orchestration | `app/domains/migration/application/preview_migration.py:PreviewMigrationUseCase.execute(path)` | Memakai `MigrationParserPort.parse_file()` → `list[MigrationStatement]` |
+| Presentasi | Handler pada `PreMigrationTab` atau tab/dialog baru | Input path → worker/use case → tampilkan hasil |
+| Wiring | `app/bootstrap.py:create_main_window()` jika ada dependency baru | Adapter → constructor MainWindow → tab |
+| Test | `tests/test_preview_migration.py` | Fake parser, tanpa Qt/MySQL untuk use case |
 
-Untuk logic migration lain:
+Gunakan model dan port existing bila cukup. Aturan murni dapat menjadi function domain; orchestration I/O berada di application. Tambahkan port hanya untuk kemampuan eksternal yang belum ada, lalu adapter di lokasi existing `app/shared/`. Pemindahan adapter ke infrastructure merupakan pekerjaan terpisah.
 
-1. Definisikan aturan dan input/output terlebih dahulu. Perhitungan murni dapat menjadi function kecil di `app/domains/migration/domain/`; orchestration I/O berada di application.
-2. Gunakan/tambahkan dataclass di `domain/models.py` atau file domain khusus jika konsepnya cukup besar. Jangan memasukkan format widget ke model.
-3. Tambah use case terfokus; tidak perlu menaruh semua class selamanya di `application/use_cases.py`.
-4. Jika memerlukan kemampuan eksternal yang belum ada, tambahkan kontrak spesifik di `application/ports.py`, lalu adapter. Saat mengikuti lokasi existing, adapter ada di `app/shared/`; tujuan yang disarankan setelah penataan adalah `app/infrastructure/`.
-5. Hubungkan adapter → use case → handler UI. Gunakan callable progress existing `ProgressCallback = Callable[[str, int, int], None]` bila cukup; application tidak perlu mengenal Qt signal.
-6. Ambil semua nilai widget sebelum membuat function worker. Tangani hasil normal yang menyatakan kegagalan bisnis dan exception secara berbeda.
-7. Uji aturan di luar Qt dengan fake port. Pengujian adapter subprocess harus terisolasi atau memakai database disposable, bukan database operasional.
-
-Untuk fitur yang benar-benar merupakan domain berbeda, baru pertimbangkan package `app/domains/<fitur>/`. Jangan membuat domain baru hanya karena ada tab baru. Tidak perlu base service, base repository, event bus, atau dependency injection container untuk setiap penambahan.
+Callback progress existing adalah `ProgressCallback = Callable[[str, int, int], None]` di `application/ports.py`. Application tidak perlu mengenal Qt signal. Buat domain baru hanya jika konsep bisnisnya berbeda, bukan sekadar karena ada tab baru. Tidak perlu event bus, base repository, atau framework service.
 
 ## 14. Current Architecture Problems
 
-Temuan berikut dibedakan antara fakta kode dan dampak/risiko yang disimpulkan. Ini bukan daftar perubahan yang telah dilakukan.
+Pembuatan dependency dan layout tiga tab sudah keluar dari MainWindow. Masalah lama berupa satu class berisi seluruh UI telah dikurangi; masalah berikut masih terlihat pada source:
 
-| Temuan dan lokasi | Bukti existing | Dampak saat dikembangkan |
-| --- | --- | --- |
-| `MainWindow` terlalu banyak responsibility — `app/presentation/qt/migration/main_window.py` | Sekitar 788 baris mencakup layout tiga tab, wiring adapter/use case, state, JSON history, dialogs, dan thread | Penambahan tab/fitur menyentuh class yang sama; pengujian UI dan orchestration sulit dipisahkan |
-| Akses widget dari worker — `MainWindow._execute_final()` | Lambda yang dieksekusi `Worker.run()` memanggil `final_migration.text()`, `_final_config()`, dan `final_password.text()` serta membaca `last_backup` | Akses QWidget di luar GUI thread dan input yang tidak diambil sebagai snapshot; pola reset/pre/backup sudah mengambil input sebelum worker |
-| I/O sinkron di GUI — `_test_pre_connection()`, `_validate_final()`, `_approve()`, `_update_final_state()`, `_show_history()` | Pemanggilan subprocess, hash, atau filesystem langsung dari handler/konstruksi UI | UI berpotensi macet pada koneksi lambat atau file besar; backend tidak memiliki timeout subprocess eksplisit |
-| State tidak terikat pada input — `_browse_file()`, `_backup_finished()`, `_validate_final()` | Tidak ada signal perubahan input yang mereset `last_backup`; edit host/database/path tidak menghapus metadata backup lama | Backup sebelumnya dapat tetap dianggap tersedia setelah target berubah |
-| Gate backup terlalu lemah — `use_cases.py:ValidateFinalMigrationUseCase.execute()` | `backup_ok = backup is not None`; tidak mencocokkan host/database/hash migration atau memanggil `verify_backup()` lagi | Metadata lama atau file yang berubah setelah backup tidak ditolak oleh check ini. Verifikasi ukuran/hash hanya dilakukan saat pembuatan backup |
-| Validasi readable dan approval terbatas — `ValidateFinalMigrationUseCase.execute()` | Readable berarti `is_file()` dan ukuran `>= 0`; approval valid berdasarkan keberadaan, hash, dan count | Label readable tidak membuktikan file bisa dibaca; hashing tetap bisa melempar exception. Belum ada provenance environment pada hasil execution |
-| Approval tidak menjamin asal TEST pada boundary — `ApproveMigrationUseCase.execute()` dan `models.py:MigrationExecutionResult` | Hanya status/hash yang diperiksa; hasil tidak membawa environment. `RunMigrationUseCase` sendiri menerima TEST maupun PRODUCTION | GUI normal menggunakan hasil pre, tetapi pemanggil baru harus berhati-hati; kontrak belum menegakkan asal test secara mandiri |
-| Operasi paralel/shutdown belum dikoordinasikan — `MainWindow._run_worker()` | Hanya tombol backup mendapat busy guard; tidak ada `closeEvent()` atau cancellation | Klik berulang/reset bersamaan dan penutupan window saat worker aktif perlu kebijakan eksplisit |
-| Sebagian koneksi callback thread masih berupa lambda/closure — `_run_worker()` | Progress memakai slot `MainWindow`, sedangkan error dan cleanup menggunakan callable biasa | Konteks eksekusi callback UI perlu diuji pada PySide6 yang digunakan; dokumentasi ini tidak mengklaim telah memverifikasi thread callback tersebut |
-| History melewati boundary — `_show_history()` dan `HistoryPort` | UI mengetahui `history.root`, glob dan format JSON; port tidak menyediakan query | Mengganti format/backend history memerlukan perubahan UI; JSON invalid dilewati tanpa penjelasan |
-| Metadata backup tidak masuk history final — `RunFinalMigrationUseCase.execute()` → `RunMigrationUseCase.execute()` | Parameter backup berhenti di validasi; `save_execution()` dipanggil tanpa backup | Audit execution tidak memiliki referensi backup walaupun repository mendukungnya |
-| Granularitas history/approval — `LocalHistoryRepository` | Nama folder memakai timestamp sampai detik, satu file approval global | Eksekusi dalam detik yang sama berpotensi menulis folder sama; multi-migration/multi-target akan memerlukan identitas lebih jelas |
-| Model eksekusi per statement — `MySqlClient.execute()` | Proses mysql baru untuk setiap statement | Session SQL tidak bertahan; perubahan menuju koneksi persisten merupakan perubahan semantik, bukan sekadar refactor |
-| Reset/import tidak memeriksa isi dump — `ResetTestDatabaseUseCase.execute()` dan `MySqlClient.import_sql()` | Gate memeriksa label TEST, tetapi file SQL langsung diberikan ke mysql. Backup provider menghasilkan dump dengan `--databases` | Jika dump berisi `USE`/DDL database, database aktif dapat ditentukan isi SQL; label TEST saja tidak membuktikan seluruh perintah dibatasi ke target test. Belum diuji secara runtime |
-| Validasi form tersebar — `_pre_config()`, `_final_config()` | `int(port_text)` dilakukan langsung; beberapa handler memanggilnya di luar try | Input invalid dapat keluar dari handler tanpa pesan validasi yang seragam |
-| Data hasil dan state kurang tegas — `RunMigrationUseCase`, `MigrationStatus` | Nol statement dapat menghasilkan SUCCESS; pre-flight kemudian mensyaratkan `success_count > 0`; enum tidak membentuk state machine | Pemanggil baru perlu memahami perbedaan sukses eksekusi, approval, dan kesiapan final |
-| Sisa kode dan logging — `_pre_finished()`, komentar implementasi lama, `Worker.run()`, reset use case, `MySqlClient.import_sql()` | Ada jalur lama yang tidak dipakai dan banyak `print()` meskipun logger dikonfigurasi | Pembaca mudah mengikuti alur salah; print tidak otomatis masuk file logging |
-| Struktur/dependensi tidak konsisten (sebagian selesai pada Tahap 2) | `README.md`, `AGENTS.md`, `app/config.py`, `pyproject.toml` | Dependency runtime/dev dan minimum Python sudah diselaraskan. Perbedaan tree infrastructure belum ditangani karena termasuk pekerjaan struktur berikutnya |
+| Lokasi | Kondisi existing dan dampaknya |
+| --- | --- |
+| `main_window.py:MainWindow._run_worker()` | Lifecycle thread masih bersama shell UI. Close saat worker aktif sekarang ditolak, tetapi cancellation dan guard operasi Final belum menyeluruh |
+| `final_migration_tab.py:FinalMigrationTab._execute_final()` | Function worker membaca widget dan `last_backup` saat dijalankan; belum menggunakan snapshot input seperti pre/reset/backup |
+| Pre `_test_pre_connection()`, `_approve()`; Final `_validate_final()`, `_update_final_state()`; History `_show_history()`, `_reset_all_data()` | I/O masih sinkron di GUI dan dapat membekukan UI; pemisahan class tidak mengubah threading |
+| `final_migration_tab.py` | Edit target/path tidak menginvalidasi metadata backup lama; pembaruan status masih berupa callback eksplisit |
+| `history_tab.py:HistoryTab` | UI mengetahui root, format JSON, approval path, dan menghapus file langsung. Belum ada boundary query/delete; import widget juga masih terduplikasi |
+| `HistoryTab._reset_all_data()` | Tidak mereset `PreMigrationTab.last_pre_result`/`FinalMigrationTab.last_backup` atau mengupdate status final; tidak mengunci operasi worker. Error dapat terjadi setelah sebagian file terhapus |
+| `MainWindow._set_final_migration()`, `_update_final_state()` | Delegasi lintas komponen masih memanggil method Final berawalan underscore. Callback cukup sederhana, tetapi kontrak belum diekspresikan sebagai API publik |
+| `use_cases.py:ValidateFinalMigrationUseCase.execute()` | Backup dianggap valid jika metadata tidak None; target/hash/file tidak diverifikasi ulang. Readable hanya is_file dan ukuran >= 0. Gate lain gagal tidak menghentikan pemeriksaan koneksi PRODUCTION |
+| `ApproveMigrationUseCase.execute()` | Memeriksa status/hash, bukan konsistensi count atau provenance TEST; model hasil tidak membawa environment |
+| `RunMigrationUseCase.execute()` | Nol statement dapat SUCCESS, tetapi final gate mensyaratkan success_count > 0; kegagalan persistence dapat muncul setelah SQL selesai |
+| `RunFinalMigrationUseCase` → `RunMigrationUseCase` | Metadata backup tidak diteruskan ke history execution |
+| `LocalHistoryRepository` | Satu approval global; timestamp folder sampai detik dapat bentrok pada execution berdekatan |
+| `MySqlClient.execute()` | Proses baru per statement, sehingga state session tidak bertahan; mengganti koneksi merupakan perubahan semantik |
+| `ResetTestDatabaseUseCase` → `MySqlClient.import_sql()` | Label TEST tidak memvalidasi isi dump; SQL `USE`/DDL dalam file dapat menentukan targetnya sendiri. Belum diverifikasi melalui integrasi database |
+| Pre `_pre_config()`, Final `_final_config()` | Konversi `int(port)` langsung, sebagian di luar try handler |
+| Worker/reset/import | Masih banyak `print()` yang tidak otomatis masuk logging file |
 
-README juga menyebut connection profile disimpan tanpa password. Tidak ditemukan implementasi penyimpanan profile tersebut; yang ditemukan adalah field GUI yang diinisialisasi dari environment/.env. Dokumen ini tidak mengasumsikan profile manager atau password prompt yang belum ada.
+Semua nama file singkat pada tabel UI berada di `app/presentation/qt/migration/`; use case di `app/domains/migration/application/use_cases.py`; adapter di `app/shared/` seperti bagian 9. Temuan ini bukan perubahan yang sudah diterapkan.
 
-Tahap 1 menambahkan baseline pada `tests/conftest.py`, `tests/test_migration_use_cases.py`, dan `tests/test_history_repository.py`, melengkapi test hash/parser/safety existing: 57 kasus lolos. Cakupan meliputi run migration, approval, final gate/orchestration, dan persistence. Test lifecycle worker, UI, serta integrasi MySQL belum tersedia.
+Test repository terdiri dari baseline application/history dan hash/parser/safety. Baseline sebelum fitur resume berjumlah 57 test. Verifikasi fitur resume terakhir menghasilkan **78 passed, 0 failed**, termasuk dua test Qt offscreen dengan worker nyata dan database palsu. Fitur resume menambahkan `tests/test_resumable_pre_migration.py` dan test Qt offscreen `tests/test_pre_migration_resume_ui.py`; test UI memakai QThread nyata dengan fake database dan dapat di-skip bila PySide6 tidak tersedia. Smoke test terdahulu tidak membuktikan integrasi MySQL, keamanan seluruh callback thread, atau behavior penghapusan lokal yang sekarang ada di History.
 
 ## 15. Recommended Refactor
 
-Rekomendasi mempertahankan pendekatan sederhana: widget terpisah, use case kecil, constructor injection, dan port yang sudah ada. Tidak diperlukan DDD penuh atau framework baru.
+Pembuatan composition root dan ekstraksi tiga tab sudah selesai; jangan mengulangnya sebagai pekerjaan baru. Pekerjaan lanjutan yang masih relevan:
 
-1. **Pisahkan startup dan wiring.** Tambahkan `app/bootstrap.py:create_main_window()` untuk membuat adapter/use case dan memasukkannya ke UI. Pindahkan `run_app()` ke `app/presentation/qt/app.py`. `app/main.py` tetap entry GUI yang tipis. Objek dependensi kecil boleh memakai dataclass; tidak perlu container global.
-2. **Ekstrak tab satu per satu.** Pindahkan layout/handler milik tab ke `PreMigrationTab`, `FinalMigrationTab`, dan `HistoryTab`. `MainWindow` mengatur registrasi serta hubungan antar-tab. Gunakan signal data untuk hasil approval/input berubah, bukan akses widget silang.
-3. **Pisahkan eksekusi background.** Tempatkan `Worker` dan class kecil `TaskRunner` di `app/presentation/qt/workers/`. Runner mengelola lifecycle QThread, result/error/progress, busy state dan shutdown. Ia tetap komponen presentasi, bukan service domain.
-4. **Buat boundary history query.** Tambahkan use case pembacaan history dengan method repository yang mengembalikan data terstruktur. `HistoryTab` cukup menampilkan hasil; tidak tahu struktur JSON/direktori.
-5. **Kelompokkan adapter di infrastructure.** Pindahkan adapter database, parser, dan repository ke `app/infrastructure/`; pertahankan `shared` hanya untuk utilitas yang benar-benar umum seperti hash/logging. Jangan sekaligus mengganti backend.
-6. **Pecah use case jika membantu navigasi.** Satu file per operasi memudahkan belajar tanpa mengubah kontrak. Pertahankan application migration di bawah domain package untuk tahap awal. `app/application/` baru diperlukan bila ada orchestration lintas domain; folder kosong belum memberi manfaat.
-7. **Pisahkan penguatan behavior dari refactor.** Perbaikan gate backup, invalidation state, asal TEST, concurrency, import dump, dan metadata history harus mempunyai spesifikasi/test sendiri. Perubahan ini tidak boleh disamarkan sebagai pemindahan file yang menjaga behavior.
-8. **Rapikan kontrak dan konfigurasi.** Tambahkan type hint pada handler/worker callback yang relevan, gunakan DTO hanya bila data mulai tersebar, dan buat loading konfigurasi eksplisit bila perlu. Selaraskan dependency/version/documentation melalui perubahan tersendiri.
+1. Ekstrak lifecycle worker dari MainWindow ke `app/presentation/qt/workers/` dalam perubahan terfokus. `TaskRunner` kecil dapat dipertimbangkan, tetapi belum ada dan tidak perlu menjadi framework.
+2. Pisahkan query history dari rendering. Rencanakan boundary operasi hapus secara tersendiri karena efek dan failure semantics berbeda dari query.
+3. Perbaiki snapshot final, blocking I/O, busy/shutdown, dan invalidation state sebagai perubahan behavior eksplisit dengan test; jangan digabungkan diam-diam ke pemindahan file.
+4. Kelompokkan adapter di infrastructure bila manfaat navigasinya diperlukan. Pertahankan command SQL, format persistence, dan kontrak saat hanya memindahkan lokasi.
+5. Pecah use case berdasarkan operasi bila membantu; jangan menduplikasi application migration ke layer baru yang kosong.
+6. Perkuat gate backup/approval dan audit metadata dengan spesifikasi terpisah. Pertahankan baseline sampai perubahan safety memang disetujui.
+7. Rapikan type hint callback, API antar-tab, sisa kode/import/logging setelah pemanggil dan behavior terverifikasi.
 
-Dialog existing yang sederhana tetap layak memakai `QMessageBox`/`QFileDialog`. Buat class dialog hanya ketika ada form atau logic presentasi yang cukup kompleks. Jangan membuat class abstrak tab/dialog semata-mata untuk menyamakan bentuknya.
+Tidak diperlukan DDD penuh, event bus, container dependency, atau hierarki base-tab. Custom dialog dibuat ketika ada form kompleks, bukan sekadar mengganti pemanggilan statis Qt.
 
 ## 16. Proposed Directory Structure
 
-Tree berikut adalah target bertahap, **bukan keadaan repository sekarang**. `__init__.py` tidak ditampilkan. Bagian application migration tetap di lokasi konsep existing untuk mengurangi perpindahan yang tidak perlu.
+Target opsional bertahap berikut mempertahankan lokasi tab yang sudah diekstrak. Bagian worker runner, infrastructure, dan file use case terpisah **belum diimplementasikan**. File `__init__.py` tidak ditampilkan.
 
 ```text
 app/
-├── main.py                         # Entry GUI
-├── cli.py                          # Entry CLI hash/parse
-├── bootstrap.py                    # create_main_window(): wiring konkret
-├── config.py                       # Loading konfigurasi aplikasi
-├── domains/
-│   └── migration/
-│       ├── domain/
-│       │   ├── models.py            # Dataclass dan hasil operasi
-│       │   └── enums.py             # Environment/status/jenis statement
-│       └── application/
-│           ├── ports.py            # Kontrak I/O sesuai kebutuhan use case
-│           ├── reset_test_database.py
-│           ├── run_migration.py
-│           ├── approve_migration.py
-│           ├── validate_final_migration.py
-│           ├── create_production_backup.py
-│           ├── run_final_migration.py
-│           └── list_history.py     # Query history terstruktur
+├── main.py                         # Entry GUI, sudah ada
+├── cli.py                          # CLI hash/parse
+├── bootstrap.py                    # Composition root, sudah ada
+├── config.py                       # Konfigurasi
+├── domains/migration/
+│   ├── domain/
+│   │   ├── models.py               # Data dan hasil domain
+│   │   └── enums.py
+│   └── application/
+│       ├── ports.py                # Kontrak I/O
+│       ├── reset_test_database.py  # Pemecahan use_cases.py bila diperlukan
+│       ├── run_migration.py
+│       ├── approve_migration.py
+│       ├── validate_final_migration.py
+│       ├── create_production_backup.py
+│       ├── run_final_migration.py
+│       └── list_history.py         # Query data history terstruktur
 ├── infrastructure/
 │   ├── database/
-│   │   ├── mysql_client.py          # Adapter DatabasePort
-│   │   └── backup.py                # Adapter BackupPort
-│   ├── filesystem/
-│   │   └── history.py               # Adapter history lokal
-│   └── sql/
-│       └── parser.py                # Adapter MigrationParserPort
-├── presentation/
-│   └── qt/
-│       ├── app.py                  # run_app(): QApplication/event loop
-│       ├── workers/
-│       │   ├── worker.py           # Worker: eksekusi callable dan signal
-│       │   └── task_runner.py      # TaskRunner: ownership/lifecycle thread
-│       └── migration/
-│           ├── main_window.py      # Shell dan koordinasi antar-tab
-│           ├── tabs/
-│           │   ├── pre_migration_tab.py
-│           │   ├── final_migration_tab.py
-│           │   └── history_tab.py
-│           ├── dialogs/            # Hanya dibuat saat ada dialog kompleks
-│           │   └── connection_dialog.py  # Contoh opsional, bukan kebutuhan wajib
-│           └── widgets/
-│               └── database_form.py      # Form koneksi jika duplikasi layak diekstrak
+│   │   ├── mysql_client.py         # Adapter database
+│   │   └── backup.py               # Adapter backup
+│   ├── filesystem/history.py       # Persistence/query lokal
+│   └── sql/parser.py               # Adapter parser
+├── presentation/qt/
+│   ├── app.py                      # Startup Qt, sudah ada
+│   ├── workers/
+│   │   ├── worker.py               # Callable dan signal
+│   │   └── task_runner.py          # Ownership/lifecycle thread
+│   └── migration/
+│       ├── main_window.py          # Koordinasi tab
+│       ├── pre_migration_tab.py     # Sudah ada
+│       ├── final_migration_tab.py   # Sudah ada
+│       ├── history_tab.py          # Sudah ada
+│       └── dialogs/                # Opsional jika ada form kompleks
 └── shared/
-    ├── hashing/sha256.py            # Utility tanpa pengetahuan migration
-    └── logging/logger.py           # Setup logging teknis
+    ├── hashing/sha256.py           # Utility umum
+    └── logging/logger.py
 tests/
-├── test_hash.py
-├── test_parser.py
-├── test_safety.py
 ├── application/                    # Use case dengan fake port
 ├── infrastructure/                 # Kontrak adapter terisolasi
-└── presentation/                   # Signal, state UI, lifecycle worker
-docs/
-└── ARCHITECTURE.md
+└── presentation/                   # State/signal/lifecycle UI
+docs/ARCHITECTURE.md
 ```
 
-`bootstrap.py` menjadi tempat yang mengenal adapter konkret dan UI sekaligus. `domains/migration/application` tetap mengatur workflow tanpa Qt; `infrastructure` menangani I/O; `presentation` menerjemahkan input/output pengguna; `shared` menampung utility umum. Bila kelak ada workflow lintas domain, `app/application/` dapat ditambahkan khusus untuk itu. Tidak perlu menduplikasi use case migration di dua tempat.
-
-`DatabaseForm` bersifat opsional: ia hanya mengelola field dan validasi input, bukan menetapkan safety policy TEST/PRODUCTION atau menjalankan query. `TaskRunner` juga tidak boleh menjadi tempat semua business logic dipindahkan dari `MainWindow`.
+Bootstrap mengenal adapter konkret dan UI; application mengatur workflow tanpa Qt; infrastructure mengimplementasikan I/O; presentation mengelola pengguna dan thread Qt; shared hanya utility umum. `app/application/` lintas domain belum diperlukan selama workflow masih khusus migration. Tree test di atas adalah pengelompokan usulan, bukan lokasi test existing atau instruksi memindahkannya sekarang.
 
 ## 17. Refactor Roadmap
 
-Tahap 1 (baseline) sudah selesai. Tahap 2 menyelaraskan dependency runtime/dev dan minimum Python tanpa mengubah source aplikasi. Tahap 3 dan seterusnya masih berupa rekomendasi, belum dijalankan.
-
-Verifikasi Tahap 2 (22 September 2026): instalasi package dengan extra `dev` dalam
-virtual environment baru di `/tmp` berhasil pada Python 3.10.12; seluruh suite
-menghasilkan **57 passed, 0 failed**, dan `pip check` tidak menemukan konflik.
-Seluruh module aplikasi dari package terinstal dapat diimpor. Entry CLI
-`khanza-migrator --help` dan `python -m app.cli --help` berhasil. `run_app()`
-diperiksa memakai Qt offscreen: tiga tab terbentuk, event loop berjalan lalu
-ditutup otomatis, tidak ada worker aktif atau pemanggilan subprocess. Lokasi
-home untuk history/log diarahkan ke direktori sementara melalui test harness.
-Pemeriksaan ini bukan pengujian interaksi GUI lengkap atau integrasi MySQL.
-
-| Tahap | Perubahan kecil | Cara memastikan aman |
+| Tahap | Status berdasarkan source dan pekerjaan terdahulu | Langkah/verifikasi |
 | --- | --- | --- |
-| 1. Tetapkan baseline | Dokumentasikan urutan operasi dan kontrak hasil dari use case existing; tambahkan test terfokus untuk stop-on-first-error, approval/hash, final gate, dan persistensi | Gunakan fake parser/database/history; catat behavior existing termasuk keterbatasan, tanpa koneksi production |
-| 2. Selaraskan instalasi | Deklarasikan dependency yang memang diimpor, sepakati minimum Python, perbarui README | Cek import/startup dalam environment uji terisolasi; pisahkan dari perubahan workflow |
-| 3. Ekstrak composition | Tambahkan bootstrap; pindahkan pembuatan adapter keluar `MainWindow` tanpa mengubah instance/metode yang dipakai | Bandingkan dependensi yang diinjeksi dan smoke-test startup serta CLI |
-| 4. Ekstrak History dahulu | Buat `HistoryTab` dengan tampilan/query existing, lalu tambah boundary query dalam perubahan terpisah | Pertahankan urutan, limit 100, format tampilan, dan kebijakan error sampai ada perubahan behavior yang disetujui |
-| 5. Ekstrak tab migration | Pindahkan Pre lalu Final satu per satu; hubungkan signal hasil/state eksplisit | Verifikasi tombol, dialog, callback aktif, approval dan status tetap setara |
-| 6. Ekstrak worker runner | Pindahkan mekanisme thread ke `presentation/qt/workers/` | Uji progress, hasil FAILED normal vs exception, cleanup, dan ownership; jangan sekaligus mengubah policy operasi |
-| 7. Perbaiki thread/state secara eksplisit | Snapshot input final sebelum worker; pindahkan I/O lama dari GUI; tentukan busy guard dan shutdown | Uji interaksi selama operasi, pembatalan/penutupan, dan callback selalu memperbarui UI di GUI thread |
-| 8. Rapikan lokasi adapter/use case | Pindahkan adapter ke infrastructure dan pecah file use case bila perlu; perbarui seluruh import termasuk CLI/test/bootstrap | Jalankan test existing dan cek import; perubahan ini tidak mengganti format file, command SQL, atau algoritma parser |
-| 9. Perkuat kontrak safety dan audit | Cocokkan backup dengan target/hash, verifikasi ulang file, invalidasi state, pastikan asal TEST, simpan referensi backup; evaluasi isi dump sebelum reset/import | Tambah test per aturan; uji integrasi hanya di database disposable. Perlakukan sebagai perubahan behavior terpisah |
-| 10. Bersihkan sisa kode | Hapus jalur komentar/usang setelah pemanggil dipastikan, seragamkan logging/type hints, perbarui panduan | Pastikan callback aktif tidak berubah; review diff kecil dan jalankan pemeriksaan yang relevan |
+| 1. Tetapkan baseline | Selesai; 57 kasus pada suite terakhir yang dilaporkan | Pertahankan baseline use case, count/hash, stop-on-first-error dan format persistence |
+| 2. Selaraskan instalasi | Selesai | Python >=3.10, runtime dotenv, extra dev pytest; instalasi bersih/import/startup telah diverifikasi pada tahap tersebut |
+| 3. Ekstrak composition | Selesai | `bootstrap.create_main_window()`, `qt/app.py:run_app()`, constructor injection MainWindow |
+| 4. Ekstrak History | Ekstraksi UI selesai; boundary query belum dibuat | `HistoryTab` tetap membaca JSON langsung. Source saat ini juga memiliki aksi hapus lokal; dokumentasikan/uji sebelum mengubah boundary |
+| 5. Ekstrak tab migration | Pre dan Final selesai | State/handler berada di tab; callback Pre → MainWindow → Final dan worker bersama tetap digunakan |
+| 6. Ekstrak worker runner | Belum | Pindahkan lifecycle terpisah, verifikasi result/progress/error/cleanup tanpa sekaligus mengubah policy operasi |
+| 7. Perbaiki thread/state | Belum | Snapshot final, I/O background, busy guard, shutdown, serta sinkronisasi state setelah reset data lokal; test sebagai perubahan behavior |
+| 8. Rapikan adapter/use case | Belum | Pindahkan lokasi bila diperlukan, perbarui import dan jalankan suite tanpa mengubah backend/format |
+| 9. Perkuat safety/audit | Belum | Backup-target/hash, verifikasi ulang, asal TEST, metadata history, dan validasi dump; gunakan database disposable untuk integrasi |
+| 10. Bersihkan sisa kode | Belum menyeluruh | Hapus jalur usang/import duplikat, seragamkan logging/type hint setelah verifikasi pemanggil |
 
-Perubahan backend koneksi agar session SQL bertahan, cancellation subprocess, dan model multi-approval memerlukan keputusan fitur tersendiri; jangan digabungkan ke refactor struktur. Setiap tahap sebaiknya dapat direview dan dibatalkan terpisah. Dokumentasi awal tidak mengubah source; pembaruan Tahap 1 hanya menambahkan test dan Tahap 2 hanya menyelaraskan metadata instalasi serta dokumentasi.
+Pemeriksaan pada tahap ekstraksi terdahulu mencakup 57 test serta smoke Qt offscreen (tab, callback, input dan hasil dengan stub). Fitur resume memiliki test tambahan untuk successful prefix, edit tail, export/approval, checkpoint failure, dan interaksi Qt; aksi hapus data lokal tidak diuji ulang pada pekerjaan fitur ini. Setiap tahap berikutnya tetap perlu scope dan pengujian sendiri; perubahan sesi SQL, cancellation subprocess, atau model multi-approval merupakan keputusan behavior tersendiri.
