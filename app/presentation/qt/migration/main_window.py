@@ -12,6 +12,8 @@ from .final_migration_tab import FinalMigrationTab
 from .history_tab import HistoryTab
 from .pre_migration_tab import PreMigrationTab
 from .workers import Worker
+from app.domains.migration.application.migration_preflight import MigrationPreflight
+from app.domains.migration.application.diagnostic_migration import DiagnosticMigration
 
 
 class MainWindow(QMainWindow):
@@ -24,6 +26,8 @@ class MainWindow(QMainWindow):
         history: LocalHistoryRepository,
         parser: MigrationParserPort,
         pre_migration: ResumablePreMigration,
+        preflight: MigrationPreflight | None = None,
+        diagnostic: DiagnosticMigration | None = None,
     ) -> None:
         super().__init__()
 
@@ -47,6 +51,8 @@ class MainWindow(QMainWindow):
             run_worker=self._run_worker,
             migration_selected=self._set_final_migration,
             update_final_state=self._update_final_state,
+            preflight=preflight,
+            diagnostic=diagnostic,
         )
         self.tabs.addTab(self.pre_tab, "Pre-Migration")
         self.final_tab = FinalMigrationTab(

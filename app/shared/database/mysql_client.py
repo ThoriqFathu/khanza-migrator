@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -195,5 +196,10 @@ class MySqlClient:
         if result.returncode != 0:
             error = result.stderr.strip() or result.stdout.strip() or "MySQL command gagal."
             exc = RuntimeError(error)
-            setattr(exc, "errno", None)
+            # Preserve raw CLI output; expose a code only for the documented ERROR form.
+            # No command or password environment is attached to the exception.
+            raw = result.stderr or result.stdout
+            match = re.search(r"^ERROR ([0-9]+) \([A-Z0-9]{5}\)(?: at line [0-9]+)?:", raw, re.M)
+            setattr(exc, "errno", int(match.group(1)) if match else None)
+            setattr(exc, "stderr", raw)
             raise exc

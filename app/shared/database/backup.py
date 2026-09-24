@@ -26,7 +26,7 @@ class MySqlDumpBackupProvider:
             "--routines",
             "--triggers",
             "--events",
-            "--databases", config.database,
+            config.database,
         ]
 
         with output_file.open("wb") as output:

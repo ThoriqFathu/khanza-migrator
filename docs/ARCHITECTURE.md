@@ -1,8 +1,8 @@
 # Arsitektur dan Panduan Pengembangan Khanza Migrator
 
-Diperbarui berdasarkan source repository pada **23 September 2026**. Semua path relatif terhadap root repository. Bagian 1–10 menjelaskan implementasi saat ini; bagian 11–13 panduan pengembangan; bagian 14 masalah yang masih ada; bagian 15–17 rekomendasi dan status roadmap.
+Diperbarui berdasarkan source repository pada **25 September 2026**. Semua path relatif terhadap root repository. Bagian 1–10 menjelaskan implementasi saat ini; bagian 11–13 panduan pengembangan; bagian 14 masalah yang masih ada; bagian 15–17 rekomendasi dan status roadmap.
 
-Dokumen ini juga mencakup fitur resume Pre-Migration: editor SQL tersisa, checkpoint sukses, dan export migration_final.sql. Pengujian fitur menggunakan fake database serta Qt offscreen; tidak menjalankan MySQL atau migration pada database sungguhan.
+Dokumen ini juga mencakup Migration Preflight (analisis read-only pada TEST), Diagnostic Migration (actual execution continue-on-error + laporan Markdown), dan fitur resume Pre-Migration: editor SQL tersisa, checkpoint sukses, dan export migration_final.sql. Pengujian fitur menggunakan fake database serta Qt offscreen; tidak menjalankan MySQL atau migration pada database sungguhan.
 
 ## 1. Overview
 
@@ -18,7 +18,7 @@ Urutan baca untuk belajar codebase:
 4. `app/presentation/qt/migration/workers.py:Worker.run()` → `app/domains/migration/application/resumable_pre_migration.py:ResumablePreMigration.run()` untuk Pre; runner production tetap `RunMigrationUseCase.execute()`.
 5. `app/domains/migration/application/ports.py`, model domain, lalu adapter di `app/shared/`.
 
-Tidak ada dependency injection framework, registry tab, `TaskRunner`, custom `QDialog`, atau class `MigrationService`. Orchestration aplikasi memakai class `*UseCase` dengan method `execute()`.
+Tidak ada dependency injection framework, registry tab, `TaskRunner`, atau class `MigrationService`. Dialog custom yang sudah ada adalah `PreflightDialog` untuk hasil audit dan `DiagnosticResultDialog` untuk actual failures/SQL lengkap. Orchestration aplikasi memakai class `*UseCase` dengan method `execute()`.
 
 ## 2. Application Entry Point
 
@@ -45,7 +45,7 @@ CLI langsung menggunakan `app/shared/hashing/sha256.py:sha256_file()` atau `app/
 2. Import berlanjut melalui bootstrap, `MainWindow`, dan module tab. Module tab mengimpor `app/config.py`, yang memanggil `load_dotenv(BASE_DIR / ".env")` dan membentuk konstanta `PRE_*`/`FINAL_*` melalui `env()` dan `env_int()`. Port invalid dapat gagal saat import.
 3. `run_app()` memanggil `app/shared/logging/logger.py:configure_logging()`, membuat log di `~/.khanza-migrator/logs/application.log`.
 4. `run_app()` membuat `QApplication([])`, baru memanggil `app/bootstrap.py:create_main_window()`.
-5. Bootstrap membuat satu `MySqlClient`, `MySqlDumpBackupProvider`, `LocalHistoryRepository`, dan `SqlMigrationParser`, lalu mengirimkannya sebagai argument constructor `MainWindow`.
+5. Bootstrap membuat `MySqlClient`, `MySqlDumpBackupProvider`, `LocalHistoryRepository`, `SqlMigrationParser`, `ResumablePreMigration`, `MigrationPreflight(parser, MigrationPreflightExtractor(), MySqlPreflightReader(db))`, serta `DiagnosticMigration(parser, db)`. Service dan adapter dikirim melalui constructor `MainWindow`; MainWindow meneruskan service preflight dan diagnostic ke PreMigrationTab; DiagnosticPanel menerima service diagnostic.
 6. `LocalHistoryRepository.__init__()` membuat direktori history bila belum ada. `MainWindow.__init__()` menyimpan dependency, menghubungkan progress signal, dan menginisialisasi `_active_threads`.
 7. `MainWindow` membuat `PreMigrationTab`, `FinalMigrationTab`, dan `HistoryTab` secara eager, lalu mendaftarkannya ke `QTabWidget`. History langsung dimuat oleh `HistoryTab.__init__()`.
 8. Setelah `setCentralWidget()`, `MainWindow._update_final_state()` meneruskan panggilan ke `FinalMigrationTab._update_final_state()`. Method ini membaca approval/hash dan menonaktifkan tombol eksekusi final.
@@ -83,10 +83,15 @@ app/
 │   ├── domain/
 │   │   ├── enums.py
 │   │   ├── models.py
-│   │   └── session.py
+│   │   ├── session.py
+│   │   ├── preflight.py
+│   │   └── diagnostic.py
 │   └── application/
 │       ├── ports.py
 │       ├── use_cases.py
+│       ├── diagnostic_migration.py
+│       ├── migration_preflight.py
+│       ├── preflight_ports.py
 │       ├── resumable_pre_migration.py
 │       └── session_ports.py
 ├── presentation/qt/
@@ -94,12 +99,16 @@ app/
 │   └── migration/
 │       ├── main_window.py
 │       ├── pre_migration_tab.py
+│       ├── preflight_dialog.py
+│       ├── diagnostic_panel.py
 │       ├── final_migration_tab.py
 │       ├── history_tab.py
 │       └── workers.py
 └── shared/
+    ├── diagnostic_report.py
     ├── database/
     │   ├── mysql_client.py
+    │   ├── preflight.py
     │   └── backup.py
     ├── filesystem/
     │   ├── history.py
@@ -108,6 +117,7 @@ app/
     ├── logging/logger.py
     └── sql/
         ├── parser.py
+        ├── preflight_extractor.py
         └── render.py
 tests/
 ├── conftest.py
@@ -117,7 +127,15 @@ tests/
 ├── test_migration_use_cases.py
 ├── test_history_repository.py
 ├── test_resumable_pre_migration.py
-└── test_pre_migration_resume_ui.py
+├── test_pre_migration_resume_ui.py
+├── test_preflight_extractor.py
+├── test_migration_preflight.py
+├── test_preflight_database.py
+├── test_preflight_ui.py
+├── test_diagnostic_migration.py
+├── test_diagnostic_error_capture.py
+├── test_diagnostic_report.py
+└── test_diagnostic_ui.py
 docs/ARCHITECTURE.md
 pyproject.toml
 requirements.txt
@@ -136,6 +154,10 @@ AGENTS.md
 | `app/presentation/qt/app.py` | `run_app()` | Logging startup, QApplication, show, event loop |
 | `app/presentation/qt/migration/main_window.py` | `MainWindow` | Registrasi tab, penghubung Pre → Final, ownership worker/thread |
 | `app/presentation/qt/migration/*_tab.py` | `PreMigrationTab`, `FinalMigrationTab`, `HistoryTab` | Form, dialog, handler, state dan rendering milik tab |
+| `app/domains/migration/application/diagnostic_migration.py` | `DiagnosticMigration.execute()` | Actual TEST execution, continue-on-error, result diagnostic terpisah dari PRE/approval |
+| `app/shared/diagnostic_report.py` | `render_diagnostic_report()` | Pure rendering Markdown dari result, tanpa Qt/I/O/database |
+| `app/domains/migration/application/migration_preflight.py` | `MigrationPreflight`, `ForeignKeyOrphanAnalyzer`, `ColumnForeignKeyDependencyAnalyzer` | Analisis TEST, agregasi temuan, tanpa Qt atau SQL execution |
+| `app/domains/migration/application/preflight_ports.py` | `PreflightDatabasePort`, `PreflightExtractorPort` | Kontrak read-only database dan ekstraksi operasi SQL |
 | `app/domains/migration/application/use_cases.py` | Enam class `*UseCase` | Workflow dan validasi prasyarat, tanpa Qt |
 | `app/domains/migration/application/ports.py` | `DatabasePort`, `BackupPort`, `HistoryPort`, `MigrationParserPort` | Kontrak `typing.Protocol`, dipenuhi adapter secara struktural |
 | `app/domains/migration/domain/` | Dataclass dan enum | Data migration, hasil, approval, backup, safety report; tanpa PySide6 |
@@ -157,7 +179,7 @@ AGENTS.md
 | `history_tab.py:HistoryTab` | `history_text`, repository | `_show_history()`, `_reset_all_data()` |
 | `main_window.py:MainWindow` | `tabs`, `pre_tab`, `final_tab`, `_active_threads`, dependency bersama | `_set_final_migration()`, `_update_final_state()`, `_run_worker()` |
 
-Semua path pada tabel berada di `app/presentation/qt/migration/`. Widget dibangun langsung dengan Python/layout Qt; tidak ada Qt Designer `.ui` atau custom dialog class pada struktur ini.
+Semua path pada tabel berada di `app/presentation/qt/migration/`. Widget dibangun langsung dengan Python/layout Qt; tidak ada Qt Designer `.ui`. `preflight_dialog.py:PreflightDialog` adalah QDialog kecil untuk summary/tabel hasil analisis.
 
 Komunikasi Pre → Final menggunakan callback biasa, bukan event bus:
 
@@ -211,13 +233,14 @@ File JSON invalid atau field tidak lengkap tetap menyumbang baris path; exceptio
 
 ## 8. Dialog Lifecycle
 
-Dialog existing berupa pemanggilan statis Qt; belum ada subclass `QDialog`. Parent dialog normal adalah tab yang memanggilnya, sedangkan error worker masih memakai parent `MainWindow`.
+Sebagian besar dialog berupa pemanggilan statis Qt. `app/presentation/qt/migration/preflight_dialog.py:PreflightDialog(QDialog)` menerima `MigrationPreflightResult`; `_show_preflight()` membuat dan menampilkannya dengan `show()`. Tombol Close menutup dialog. Instance sebelumnya ditutup/dijadwalkan `deleteLater()` saat hasil dibuka lagi; parent tab mengelola lifetime-nya. Parent dialog normal adalah tab yang memanggilnya, sedangkan error worker masih memakai parent `MainWindow`.
 
 | Pemanggil | Dialog dan alur |
 | --- | --- |
 | `PreMigrationTab._browse_file()`, `FinalMigrationTab._browse_file()` | `QFileDialog.getOpenFileName()`; path kosong berarti batal |
 | `PreMigrationTab._test_pre_connection()` | Warning input, question membuat database TEST bila belum ada, critical jika gagal |
 | `PreMigrationTab._reset_test()` | Warning Yes/No default No; Yes melanjutkan dispatch reset |
+| `PreMigrationTab._run_preflight()`, `_preflight_finished()`, `_show_preflight()` | Warning input/critical fatal pada GUI thread; tombol detail membuka PreflightDialog dengan seluruh temuan |
 | `PreMigrationTab._run_pre()`, `_approve()` | Warning prasyarat; approval juga information/critical |
 | `FinalMigrationTab._validate_final()` | Critical jika exception; mengembalikan False |
 | `FinalMigrationTab._create_backup()` | Warning prasyarat, `getSaveFileName()`, question overwrite bila file sudah ada |
@@ -227,6 +250,13 @@ Dialog existing berupa pemanggilan statis Qt; belum ada subclass `QDialog`. Pare
 | `MainWindow._run_worker()` | `worker.failed` → lambda → `QMessageBox.critical()` |
 
 Password bukan dialog tersendiri: Pre/Final memakai `QLineEdit` dengan echo mode Password dan default dari konfigurasi. Handler membaca nilai input lalu mengarahkan operasi ke use case/adapter.
+
+`app/presentation/qt/migration/diagnostic_panel.py:DiagnosticResultDialog` dibuka
+oleh `DiagnosticPanel._show_details()` pada GUI thread. Tabel hanya berisi failure
+(sequence, code, actual error); pemilihan baris memanggil `_selection_changed()` untuk
+menampilkan SQL/error lengkap pada QPlainTextEdit read-only. `_export()` membuka
+QFileDialog dan menulis Markdown dari result yang sudah tersedia; tidak dispatch
+worker eksekusi lagi. Cancel/write failure mempertahankan result agar bisa dicoba lagi.
 
 ## 9. Application / Service Flow
 
@@ -240,6 +270,235 @@ Use case existing berada di `app/domains/migration/application/use_cases.py`; al
 | `ValidateFinalMigrationUseCase` | Database/history port | File, approval/hash, count pre, environment, connection, metadata backup → `SafetyReport` |
 | `CreateProductionBackupUseCase` | `BackupPort` | Wajib PRODUCTION → hash migration → create backup → verify backup |
 | `RunFinalMigrationUseCase` | Runner dan validator use case | Validasi ulang → blokir bila gagal → delegasi runner |
+
+### Migration Preflight (implementasi aktual)
+
+Preflight adalah analisis opsional sebelum sesi PRE dimulai, bukan dry-run executor
+atau gate approval/production. User melakukan Reset/Restore TEST, menekan **Run
+Migration Preflight**, membuka **Lihat Hasil Migration Preflight**, lalu memutuskan
+perbaikan dan kapan menekan Run Migration. Aplikasi tidak otomatis menjalankan SQL
+setelah audit. Tombol dinonaktifkan selama sesi resume aktif atau TEST dirty setelah Diagnostic; aplikasi tidak melacak
+bukti bahwa database telah direstore oleh aplikasi atau alat eksternal.
+
+```mermaid
+flowchart TD
+    Backup[Production Backup] --> Reset[ResetTestDatabaseUseCase.execute]
+    Reset --> Restore[MySqlClient.import_sql: restore TEST]
+    Restore --> Action[PreMigrationTab._run_preflight]
+    Input[migration.sql] --> Parser[SqlMigrationParser.parse_file]
+    Parser --> Extract[MigrationPreflightExtractor.extract]
+    Extract --> Operations[ADD FK / DROP FK / MODIFY / CHANGE]
+    Action --> Worker[MainWindow._run_worker → Worker.run]
+    Worker --> Audit[MigrationPreflight.execute]
+    Operations --> Audit
+    Metadata[information_schema TEST] --> Reader[MySqlPreflightReader]
+    Data[Data TEST: orphan count] --> Reader
+    Reader --> Audit
+    Audit --> Result[MigrationPreflightResult]
+    Result --> Signal[preflight_completed: queued signal]
+    Signal --> Render[PreMigrationTab._preflight_finished]
+    Render --> Review[PreflightDialog: user review]
+    Review --> Run[User klik Run Migration]
+    Run --> Resume[ResumablePreMigration]
+    Resume --> Output[migration_final.sql]
+    Output --> Approval[ApproveMigrationUseCase]
+```
+
+Hubungan file/class/method:
+
+| Path | Simbol | Tanggung jawab |
+| --- | --- | --- |
+| `app/domains/migration/domain/preflight.py` | `ForeignKey`, `PreflightOperation`, `PreflightFinding`, `MigrationPreflightResult`, `PreflightStatus`, `PreflightIssueType` | Data plain; enum SAFE/BLOCKER/ERROR, relasi dan sequence SQL, count summary; tanpa Qt |
+| `app/shared/sql/preflight_extractor.py` | `MigrationPreflightExtractor.extract()` | Mengonsumsi output splitter existing; ekstraksi ALTER TABLE dengan tokenizer kecil dan pembagian clause berdasarkan depth kurung; menyimpan original_sql/sequence |
+| `app/domains/migration/application/preflight_ports.py` | `PreflightExtractorPort`, `PreflightDatabasePort` | `extract()`, `test_connection()`, `count_orphans()`, `get_foreign_keys()`; tidak ada arbitrary SQL execution pada port preflight |
+| `app/domains/migration/application/migration_preflight.py` | `MigrationPreflight.execute()` | Tolak non-TEST sebelum I/O, baca/parse file, tes koneksi, orchestrate dua analyzer, progress, gabungkan seluruh temuan |
+| File application yang sama | `ForeignKeyOrphanAnalyzer.analyze()` | ADD FK dari migration → hitung orphan TEST → SAFE/BLOCKER (potensi 1452)/ERROR; kegagalan satu candidate tidak menghentikan yang lain |
+| File application yang sama | `ColumnForeignKeyDependencyAnalyzer.analyze()` | Metadata actual child/parent, evaluasi DROP sebelumnya sesuai schema/table/constraint, perhitungkan ADD sebelumnya, laporkan setiap FK aktif (potensi 1832) |
+| `app/shared/database/preflight.py` | `MySqlPreflightReader.count_orphans()`, `get_foreign_keys()` | Adapter mysql CLI read-only, komposisi dengan MySqlClient untuk konfigurasi koneksi; SELECT COUNT/NOT EXISTS dan information_schema.KEY_COLUMN_USAGE |
+| `app/presentation/qt/migration/pre_migration_tab.py` | `_run_preflight()`, `_preflight_finished()`, `_clear_preflight()`, `_show_preflight()` | Snapshot path/config/password sebelum dispatch; render hasil/fatal error pada queued Qt signal; invalidasi tampilan saat input/reset/run berubah |
+| `app/presentation/qt/migration/preflight_dialog.py` | `PreflightDialog.__init__()`, `preflight_summary()` | Summary dan tabel Status/Type/Statement/Object/Constraint/Problem; BLOCKER, ERROR, lalu SAFE; tooltip berisi SQL asli |
+| `app/bootstrap.py` | `create_main_window()` | Membuat service/extractor/reader, injection melalui MainWindow ke tab |
+
+Sumber analisis dibedakan tegas: **migration.sql** menentukan FK baru/operasi kolom;
+**information_schema TEST** menentukan FK existing (termasuk composite dan incoming
+references); **data TEST** menentukan orphan. Backup production tidak diparse untuk
+FK atau validasi dump. Preflight tidak menyimpan checkpoint, history, approval,
+status successful, pending SQL, atau output migration_final.sql.
+
+Orphan dihitung di database dengan `COUNT(*)`/`NOT EXISTS`, semua pasangan kolom
+harus match. Semua child component harus `IS NOT NULL` agar dihitung sebagai orphan;
+row composite dengan salah satu NULL dikecualikan. Metadata diambil lengkap per FK,
+diurutkan berdasarkan `ORDINAL_POSITION`, dan filtered untuk kolom yang diaudit.
+Lihat referensi [KEY_COLUMN_USAGE MySQL](https://dev.mysql.com/doc/refman/8.0/en/information-schema-key-column-usage-table.html).
+Identifier query dibungkus backtick dengan escape backtick ganda; literal filter
+metadata memakai representasi hex UTF-8. Adapter juga memeriksa Environment.TEST,
+menolak FK baru lintas schema, serta memakai database konfigurasi untuk kualifikasi
+tabel. Password tetap terpisah dalam MYSQL_PWD child process. Query memakai batch,
+raw, dan [binary-mode mysql](https://dev.mysql.com/doc/refman/8.0/en/mysql-command-options.html#option_mysql_binary-mode).
+
+Error fundamental (file tidak terbaca, non-TEST, koneksi gagal) menggagalkan audit.
+Error ekstraksi/query individual dicatat sebagai ERROR dan candidate berikutnya
+terus diproses. Summary: total statement hasil parser, candidate ADD FK, FK SAFE,
+FK orphan BLOCKER, jumlah MODIFY/CHANGE, jumlah dependency FK BLOCKER, audit ERROR.
+Jumlah dependency dapat lebih banyak daripada jumlah kolom. DROP sendiri tidak
+menambah baris SAFE; statement di luar cakupan tidak dianggap telah tervalidasi.
+
+Batas dukungan saat ini:
+
+- Mendukung single/composite ADD FK, backtick/multiline/case keyword, ON DELETE/UPDATE
+  CASCADE/RESTRICT/SET NULL/NO ACTION, beberapa clause ALTER, DROP FK, MODIFY, CHANGE
+  (dependency memakai nama kolom lama). Definisi tipe kolom tidak divalidasi penuh.
+- DROP meniadakan dependency hanya jika ada pada **statement lebih awal** di owning
+  table/schema yang sama; DROP sesudah MODIFY tidak membantu. Kombinasi FK/CHANGE
+  dan modification dalam satu ALTER dilaporkan ERROR karena urutannya tidak ditebak.
+- MODIFY/CHANGE pada tabel yang sudah memiliki CHANGE sebelumnya dilaporkan ERROR;
+  metadata hasil rename belum diproyeksikan. ADD bernama sama setelah DROP mengaktifkan
+  kembali dependency yang diprediksi; audit tetap mengasumsikan statement sebelumnya sukses.
+- ALTER lain, FK inline CREATE TABLE, MATCH/prefix-index FK atau syntax relevan yang
+  tidak aman diekstrak menghasilkan ERROR/unsupported. Non-ALTER biasa seperti DML
+  tidak dianalisis. Keterbatasan splitter existing (termasuk leading executable
+  comments yang telah dibuang splitter) tetap berlaku; ini bukan validator SQL lengkap.
+- Ini pembacaan state saat audit, bukan simulasi efek DML/DDL sebelumnya. Tabel/kolom
+  yang baru dibuat migration dapat menyebabkan query ERROR; data yang diubah migration
+  dapat membuat hasil orphan berbeda. Renaming tabel dan perubahan jenis lain tidak
+  diproyeksikan. SAFE bukan jaminan migration/production akan sukses.
+- Pencocokan dependency tabel konservatif terhadap casing, sedangkan DROP menggunakan
+  nama table/schema persis; pada server case-insensitive dapat muncul blocker berlebih.
+  Semua dependency incoming yang terlihat akun TEST dilaporkan, termasuk metadata
+  lintas schema; data schema lain tidak diaudit. Kelengkapan metadata bergantung privilege akun.
+- Environment.TEST memeriksa label konfigurasi, bukan membuktikan identitas server.
+  Tidak ada akses database sungguhan pada test fitur; kompatibilitas server aktual
+  perlu uji pada database disposable. Belum ada cancellation/timeout atau snapshot
+  transaksi bersama; perubahan eksternal selama/sesudah audit tidak terlacak.
+- Hasil hanya di memori; edit file di editor luar tidak otomatis terdeteksi. Jalankan
+  ulang audit setelah perbaikan. UI tidak mengunci Run Migration berdasarkan hasil audit.
+
+### Diagnostic Migration (implementasi aktual)
+
+| Mode | Database | Eksekusi dan hasil |
+| --- | --- | --- |
+| Migration Preflight | TEST, read-only | Prediksi masalah FK tertentu berdasarkan migration/metadata/data aktual |
+| Diagnostic Migration | Fresh TEST, mutating | Execute semua statement secara urut, lanjut setelah SQL failure, catat actual errors, export Markdown |
+| PRE Migration | TEST, mutating | Fail-fast → checkpoint → edit pending SQL → resume; output final dan hasil PRE diperlukan untuk approval |
+
+```mermaid
+flowchart TD
+    SQL[migration.sql] --> P[SqlMigrationParser.parse_file]
+    P --> PF[MigrationPreflight: read-only analysis]
+    P --> D[DiagnosticMigration: actual run / continue-on-error]
+    P --> PRE[ResumablePreMigration: actual run / fail-resume]
+    Reset[Reset / Restore TEST sukses] --> D
+    D --> R[DiagnosticMigrationResult: actual errors]
+    R --> UI[DiagnosticPanel / DiagnosticResultDialog]
+    R --> MD[render_diagnostic_report → Markdown file]
+    D --> Dirty[TEST DIRTY]
+    Dirty --> Again[User wajib Reset / Restore TEST]
+    Again --> PRE
+    PRE --> Final[migration_final.sql + approval workflow existing]
+```
+
+File dan hubungan dependency:
+
+| Path | Class/method | Peran |
+| --- | --- | --- |
+| `app/domains/migration/domain/diagnostic.py` | `DiagnosticMigrationResult` | Started/finished UTC, database, nama file, total, list StatementResult, fatal_error; computed success_count/failure_count/unattempted_count/completed |
+| `app/domains/migration/domain/models.py` | `StatementResult` (dipakai ulang tanpa perubahan) | Sequence, SQL, success boolean, duration_ms, error_code, error_message |
+| `app/domains/migration/application/diagnostic_migration.py` | `DiagnosticMigration.execute()` | Tolak non-TEST sebelum I/O, parse file, connection check, loop execute/capture/continue; tanpa history/session/approval dependency |
+| File application yang sama | `diagnostic_error_text()`, `redact_diagnostic_text()` | Memakai raw stderr bila tersedia dan menyamarkan password koneksi sebelum masuk artifact/error UI |
+| `app/domains/migration/application/ports.py` | `MigrationParserPort`, `DatabasePort` | Kontrak existing; diagnostic tidak menambahkan jalur execute/database backend baru |
+| `app/shared/database/mysql_client.py` | `MySqlClient.execute()`, `_run()` | Mekanisme CLI existing, satu proses per statement; nonzero tetap raise RuntimeError, kini juga membawa raw stderr dan errno dari header ERROR yang dikenali |
+| `app/shared/diagnostic_report.py` | `render_diagnostic_report(result, generated_at=None)` | Pure renderer Markdown; metadata, summary, semua failed SQL/errors, disclaimer cascade; tidak melakukan execution, root-cause, recommendation, atau I/O |
+| `app/presentation/qt/migration/diagnostic_panel.py` | `DiagnosticPanel._run()`, `_finished()`, `_show_details()`, `_export()` | Konfirmasi Yes/No default No, snapshot input, worker dispatch, render summary/dialog, pilih tujuan export |
+| File UI yang sama | `DiagnosticResultDialog`, `_selection_changed()` | Seluruh failure pada tabel; detail SQL/actual error baris terpilih |
+| `app/presentation/qt/migration/pre_migration_tab.py` | `_diagnostic_inputs()`, `_diagnostic_started()`, `_reset_finished()` | Koordinasi fresh/dirty target dan gate PRE, tanpa memindahkan PRE/session logic ke diagnostic |
+| `app/bootstrap.py`, `app/presentation/qt/migration/main_window.py` | `create_main_window()`, `MainWindow.__init__()` | Bootstrap membuat DiagnosticMigration(parser, db); window meneruskan dependency ke tab |
+
+Semantik execution:
+
+1. Diagnostic memakai file input PRE yang dipilih, bukan editor pending atau output
+   sesi. Split statement tetap dari `SqlMigrationParser`; seperti
+   `ResumablePreMigration._parse_pending()`, comment-only tail diabaikan. Nomor
+   execution dimulai 1 sesuai sesi PRE awal, termasuk ketika splitter memiliki
+   gap sequence akibat comment-only statement. SQL tidak ditulis ulang.
+2. File/parser/koneksi awal gagal menghentikan run sebelum ada statement; UI menampilkan
+   fatal error, belum ada artifact yang dapat diexport. Environment selain TEST ditolak
+   sebelum pembacaan file atau koneksi. File tanpa SQL juga ditolak.
+3. Setiap statement dipanggil tepat sekali melalui `DatabasePort.execute()`. Exception
+   SQL dicatat sebagai FAILED dengan actual text, lalu statement berikutnya tetap
+   berjalan. Progress bertambah setelah setiap attempt, termasuk yang gagal.
+4. Error OS seperti executable mysql hilang di tengah run menghentikan loop dengan
+   partial result `ABORTED`, fatal_error, dan count Unattempted. Failure yang sudah
+   tercatat tetap dapat diexport. OS errno tidak dianggap sebagai kode MySQL.
+   Nonzero CLI setelah initial connection tetap dicatat per statement, termasuk jika
+   server kemudian tidak dapat dihubungi; diagnostic tidak melakukan retry/auto-fix.
+5. Header `ERROR 1832 (HY000): ...` / `ERROR 1452 (23000) at line 1: ...`
+   dikenali adapter untuk errno. Format lain menghasilkan code None; raw stderr
+   (fallback stdout) tetap dipertahankan. SQLSTATE tidak diekstrak sebagai field
+   tersendiri; tetap ada dalam raw message jika CLI mengembalikannya. Pesan legacy
+   `str(exc)` dan raise pada nonzero tetap sama; PRE/Final juga dapat menerima errno
+   numerik baru tanpa perubahan workflow mereka.
+6. Diagnostic tidak memanggil Preflight dan tidak menulis checkpoint, successful
+   prefix, pending SQL, history execution, approval, atau migration_final.sql. Bahkan
+   semua statement SUCCESS tidak menghasilkan approval. Tidak ada rollback global,
+   disabling FK checks, SQL fix, retry, reorder, atau cleanup otomatis yang ditambahkan.
+
+Fresh/dirty dan threading:
+
+- `PreMigrationTab._fresh_test_target` awalnya None. Diagnostic hanya diizinkan setelah
+  reset/import/verify existing **dan clear session** sukses pada konfigurasi target
+  yang sama di aplikasi ini. Reset dari alat eksternal tidak menandai flag ini.
+- Reset worker mengembalikan snapshot DatabaseConfig. Hasil melalui `reset_completed`
+  queued signal menuju slot `_reset_finished()` pada GUI thread. Reset gagal tidak
+  membuat fresh dan tidak menghapus dirty marker.
+- `_diagnostic_inputs()` menolak sesi PRE aktif, dirty target, target non-TEST, belum
+  reset, atau file tidak ada. Sebelum dispatch, panel menampilkan host/port/database
+  TEST dan konfirmasi actual execution, continue-on-error, dan kewajiban reset.
+- Setelah Yes, `DiagnosticPanel.started(target)` memanggil `_diagnostic_started()`:
+  target dianggap dirty **sebelum worker**, fresh dibatalkan, hasil preflight lama
+  dibersihkan. Tombol PRE/approval/diagnostic/preflight dan input target dinonaktifkan;
+  handler PRE/approval juga memiliki guard, bukan hanya tombol disabled. Session PRE
+  tidak dibuat/diubah. Fatal error awal pun tetap memerlukan reset secara konservatif.
+- Dirty hanya dilepas oleh reset sukses pada **target yang sama**. Hasil diagnostic
+  lama tetap tersedia untuk export setelah reset. Edit host/port/database/username
+  atau memulai PRE membatalkan flag fresh. Sesi PRE aktif harus di-reset sebelum
+  diagnostic, sehingga checkpoint/resume tidak tercampur dengan diagnostic.
+- Worker menerima snapshot Path/DatabaseConfig/password/service saja. Wrapper
+  mengembalikan `(result, error)` dan `DiagnosticPanel.completed` memakai queued
+  connection untuk `_finished()`. Database kerja di QThread; QMessageBox, dialog hasil,
+  QFileDialog, dan rendering hanya pada GUI thread. MainWindow worker framework tetap.
+- State fresh/dirty dan result **hanya in-memory**, bukan checkpoint persistent.
+  Setelah aplikasi ditutup, result belum diexport hilang; aplikasi tidak mengingat
+  dirty status untuk PRE. User tetap wajib reset sebelum PRE setelah membuka ulang.
+  Diagnostic sendiri selalu mensyaratkan reset baru pada instance aplikasi baru.
+  Perubahan database oleh proses lain tidak terdeteksi.
+
+Format export default: `diagnostic_migration_YYYYMMDD_HHMMSS.md` (timestamp selesai,
+UTC). Report menyertakan Generated/Started/Finished, Environment TEST, nama database,
+nama file migration (bukan path lokal penuh), total/success/failure/unattempted,
+COMPLETED/ABORTED, serta setiap sequence/SQL/code/raw error yang gagal. Detail SUCCESS
+statement tidak dirender. Fences Markdown diperpanjang bila SQL/error mengandung
+backtick agar teks tetap berada dalam code block. Report memuat note bahwa kegagalan
+lanjutan bisa merupakan **secondary/cascade failure**, tanpa menentukan root cause.
+Export hanya membaca result yang sudah ada; tidak mengeksekusi database lagi.
+
+Model tidak menyimpan password, command CLI, atau environment MYSQL_PWD. Password
+koneksi yang diketahui disamarkan bila muncul dalam SQL/error/nama artifact sebelum
+result dibuat, sehingga raw text hanya berubah untuk redaction tersebut; SQL yang
+dikirim ke database tetap SQL input asli. Ini bukan scanner semua secret arbitrer
+atau data sensitif yang mungkin tertulis dalam SQL migration. Ekspor mengandung SQL
+dan actual error sebagaimana diminta; akun/host kredensial tidak ditambahkan sebagai
+metadata report.
+
+Batas integrasi: **MySQL/MariaDB nyata belum diuji** oleh suite fitur ini. Test memakai
+fake database, subprocess mock, dan Qt offscreen. Sebelum pemakaian nyata, uji manual
+pada fresh TEST hasil restore backup: run beberapa statement sukses/gagal, cocokkan
+kode/stderr actual dan sequence laporan, pastikan statement sesudah failure dicoba,
+export Markdown, lalu Reset/Restore sebelum PRE. Seperti PRE existing, satu proses
+mysql per statement tidak mempertahankan session variable/transaction antarstatement.
+Environment.TEST adalah gate konfigurasi, bukan sandbox terhadap SQL arbitrary atau
+schema-qualified SQL di file: gunakan server/akun TEST terisolasi dan migration yang
+ditujukan ke TEST. Fitur ini tidak menambahkan parser keamanan dump/SQL atau validasi
+identitas server. Tidak ada timeout/cancellation framework baru.
 
 ### Resume Pre-Migration
 
@@ -295,13 +554,13 @@ sequenceDiagram
 
 `app/presentation/qt/migration/workers.py:Worker.run()` memanggil callable dengan `self.progress.emit`, mengirim succeeded/failed, dan selalu mengirim finished. `MainWindow._run_worker()` membuat QThread, menyimpan pasangan di `_active_threads`, menghubungkan progress melalui signal milik MainWindow, serta memasang quit/deleteLater/cleanup. Backup Final mengirim tombol backup sebagai `busy_button`; run/resume/reset Pre mengirim window agar interaksi terkunci selama pekerjaan. Operasi Final lain belum memiliki guard menyeluruh.
 
-Reset, pre-run, backup, dan final-run memakai worker. Test connection langsung menggunakan adapter dari `PreMigrationTab._test_pre_connection()`. Pre-flight, approval/hash, history read, dan penghapusan lokal masih sinkron di GUI. Lambda pada `FinalMigrationTab._execute_final()` masih membaca widget saat function worker dijalankan; ekstraksi tab belum memperbaikinya.
+Reset, pre-run, backup, dan final-run memakai worker. Test connection langsung menggunakan adapter dari `PreMigrationTab._test_pre_connection()`. Validasi Final (`_validate_final()`), approval/hash, history read, dan penghapusan lokal masih sinkron di GUI. Migration Preflight dan Diagnostic Migration berjalan di worker; diagnostic memakai queued `DiagnosticPanel.completed`, dan reset sukses memakai queued `PreMigrationTab.reset_completed`. Hasil Preflight melalui `preflight_completed` dengan `Qt.ConnectionType.QueuedConnection` menuju slot tab. Wrapper worker mengembalikan pasangan result/error sehingga pesan fatal juga dibuat di GUI thread. Lambda pada `FinalMigrationTab._execute_final()` masih membaca widget saat function worker dijalankan; ekstraksi tab belum memperbaikinya.
 
 Adapter dan persistence:
 
 - `app/shared/sql/parser.py:SqlMigrationParser.parse_file()` membaca UTF-8 BOM, lalu `parse()` memecah statement dengan quote/comment/DELIMITER dasar. `_detect_type()` dan `_description()` membuat klasifikasi/deskripsi; bukan semantic SQL parser.
 - `app/shared/database/mysql_client.py:MySqlClient.execute()` membuat proses `mysql --execute` baru per statement. State session SQL tidak dijamin bertahan antarstatement. `import_sql()` memasukkan file ke stdin satu proses dan menunggu selesai; progress mulai/selesai. `verify_database()` memeriksa koneksi dan jumlah tabel lebih dari nol.
-- `app/shared/database/backup.py:MySqlDumpBackupProvider.create_backup()` menggunakan mysqldump dengan routines/triggers/events dan `--databases`. `verify_backup()` memeriksa file/ukuran/SHA-256, bukan uji restore. Password dikirim melalui environment child process `MYSQL_PWD`.
+- `app/shared/database/backup.py:MySqlDumpBackupProvider.create_backup()` menggunakan mysqldump dengan `--single-transaction`, routines/triggers/events dan nama database positional, **tanpa `--databases`**. Flag tersebut sudah tidak ada di source, sehingga mode dump yang menambahkan CREATE DATABASE/USE tidak dipilih; ini bukan validasi semantic terhadap isi backup yang dipilih user. `verify_backup()` memeriksa file/ukuran/SHA-256, bukan uji restore. Password dikirim melalui environment child process `MYSQL_PWD`.
 - `app/shared/filesystem/history.py:LocalHistoryRepository.save_execution()` menulis `migration.sql`, `result.json`, dan `metadata.json` ke `~/.khanza-migrator/history/<tahun>/<bulan>/migration_<timestamp>/`. `save_approval()` menyimpan satu `~/.khanza-migrator/approval.json`; `load_approval()` mengembalikan dataclass.
 - `save_execution()` menerima backup opsional, tetapi runner tidak mengirimkannya, termasuk alur final. Akibatnya metadata execution dari alur itu berisi `backup: null`.
 
@@ -345,7 +604,7 @@ Konfirmasi sederhana tetap dapat memakai `QMessageBox` pada handler tab. Untuk f
 4. Handler pemanggil pada Pre/Final membuat dialog dengan parent tab, menjalankan `exec()`, memeriksa Accepted, lalu mengambil data untuk use case/worker.
 5. Dialog tidak memasukkan Qt ke application/domain. Operasi panjang tidak dijalankan sinkron hanya karena berada di dialog.
 
-Path/class ini belum ada. Dialog baru hanya diperlukan jika kompleksitas form membutuhkannya; jangan membungkus semua message box dalam class baru.
+Path/class contoh `ConnectionDialog` ini belum ada; dialog hasil existing adalah `migration/preflight_dialog.py:PreflightDialog`. Dialog baru hanya diperlukan jika kompleksitas form membutuhkannya; jangan membungkus semua message box dalam class baru.
 
 ## 13. How to Add a New Feature
 
@@ -387,7 +646,7 @@ Pembuatan dependency dan layout tiga tab sudah keluar dari MainWindow. Masalah l
 
 Semua nama file singkat pada tabel UI berada di `app/presentation/qt/migration/`; use case di `app/domains/migration/application/use_cases.py`; adapter di `app/shared/` seperti bagian 9. Temuan ini bukan perubahan yang sudah diterapkan.
 
-Test repository terdiri dari baseline application/history dan hash/parser/safety. Baseline sebelum fitur resume berjumlah 57 test. Verifikasi fitur resume terakhir menghasilkan **78 passed, 0 failed**, termasuk dua test Qt offscreen dengan worker nyata dan database palsu. Fitur resume menambahkan `tests/test_resumable_pre_migration.py` dan test Qt offscreen `tests/test_pre_migration_resume_ui.py`; test UI memakai QThread nyata dengan fake database dan dapat di-skip bila PySide6 tidak tersedia. Smoke test terdahulu tidak membuktikan integrasi MySQL, keamanan seluruh callback thread, atau behavior penghapusan lokal yang sekarang ada di History.
+Test repository terdiri dari baseline application/history, hash/parser/safety, resume, preflight, dan diagnostic. Baseline sebelum fitur resume berjumlah 57 test. Baseline sebelum Diagnostic adalah **130 passed**. Verifikasi setelah Diagnostic menghasilkan **161 passed, 0 failed, 0 skipped**, termasuk regresi resume dan Qt offscreen dengan QThread nyata/database palsu. Empat file test preflight pada bagian 4 mencakup extractor, fake-port analyzer, query adapter (subprocess stub dan SQLite in-memory untuk ekspresi orphan), serta snapshot/render/fatal error GUI thread. Empat file `test_diagnostic_*.py` menguji continue-on-error, actual CLI error capture, partial/fatal run, redaction, Markdown, fresh/dirty/reset, snapshot worker, rendering GUI thread, dan export tanpa re-run. Tidak ada MySQL sungguhan atau migration nyata dijalankan. Fitur resume menambahkan `tests/test_resumable_pre_migration.py` dan test Qt offscreen `tests/test_pre_migration_resume_ui.py`; test UI memakai QThread nyata dengan fake database dan dapat di-skip bila PySide6 tidak tersedia. Smoke test terdahulu tidak membuktikan integrasi MySQL, keamanan seluruh callback thread, atau behavior penghapusan lokal yang sekarang ada di History.
 
 ## 15. Recommended Refactor
 
@@ -465,7 +724,7 @@ Bootstrap mengenal adapter konkret dan UI; application mengatur workflow tanpa Q
 | 4. Ekstrak History | Ekstraksi UI selesai; boundary query belum dibuat | `HistoryTab` tetap membaca JSON langsung. Source saat ini juga memiliki aksi hapus lokal; dokumentasikan/uji sebelum mengubah boundary |
 | 5. Ekstrak tab migration | Pre dan Final selesai | State/handler berada di tab; callback Pre → MainWindow → Final dan worker bersama tetap digunakan |
 | 6. Ekstrak worker runner | Belum | Pindahkan lifecycle terpisah, verifikasi result/progress/error/cleanup tanpa sekaligus mengubah policy operasi |
-| 7. Perbaiki thread/state | Belum | Snapshot final, I/O background, busy guard, shutdown, serta sinkronisasi state setelah reset data lokal; test sebagai perubahan behavior |
+| 7. Perbaiki thread/state | Belum menyeluruh; preflight/diagnostic memakai snapshot dan queued result, reset sukses juga queued | Snapshot final, I/O background, busy guard, shutdown, serta sinkronisasi state setelah reset data lokal; test sebagai perubahan behavior |
 | 8. Rapikan adapter/use case | Belum | Pindahkan lokasi bila diperlukan, perbarui import dan jalankan suite tanpa mengubah backend/format |
 | 9. Perkuat safety/audit | Belum | Backup-target/hash, verifikasi ulang, asal TEST, metadata history, dan validasi dump; gunakan database disposable untuk integrasi |
 | 10. Bersihkan sisa kode | Belum menyeluruh | Hapus jalur usang/import duplikat, seragamkan logging/type hint setelah verifikasi pemanggil |

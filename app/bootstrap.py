@@ -8,6 +8,10 @@ from app.shared.database.backup import MySqlDumpBackupProvider
 from app.shared.database.mysql_client import MySqlClient
 from app.shared.filesystem.history import LocalHistoryRepository
 from app.shared.sql.parser import SqlMigrationParser
+from app.shared.sql.preflight_extractor import MigrationPreflightExtractor
+from app.shared.database.preflight import MySqlPreflightReader
+from app.domains.migration.application.migration_preflight import MigrationPreflight
+from app.domains.migration.application.diagnostic_migration import DiagnosticMigration
 
 
 def create_main_window() -> MainWindow:
@@ -21,4 +25,6 @@ def create_main_window() -> MainWindow:
         history=history,
         parser=parser,
         pre_migration=ResumablePreMigration(parser, db, history, LocalSessionRepository()),
+        preflight=MigrationPreflight(parser, MigrationPreflightExtractor(), MySqlPreflightReader(db)),
+        diagnostic=DiagnosticMigration(parser, db),
     )
