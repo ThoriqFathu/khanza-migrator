@@ -14,6 +14,9 @@ from app.domains.migration.application.ports import ProgressCallback
 from app.domains.migration.domain.diagnostic import DiagnosticMigrationResult
 from app.domains.migration.domain.models import DatabaseConfig
 from app.shared.diagnostic_report import DIRTY_NOTE, render_diagnostic_report
+from app.shared.diagnostic_data_sql import (
+    render_diagnostic_data_audit, render_diagnostic_data_cleanup,
+)
 
 
 def diagnostic_summary(result: DiagnosticMigrationResult) -> str:
@@ -177,9 +180,20 @@ class DiagnosticPanel(QWidget):
         if path.suffix.lower() != '.md':
             QMessageBox.warning(self, 'Export Diagnostic Report', 'Gunakan nama file dengan extension .md.')
             return
+        audit_path = path.with_name(f'{path.stem}_data_audit.sql')
+        cleanup_path = path.with_name(f'{path.stem}_data_cleanup.sql')
         try:
             path.write_text(render_diagnostic_report(result), encoding='utf-8')
+            audit_path.write_text(render_diagnostic_data_audit(result), encoding='utf-8')
+            cleanup_path.write_text(render_diagnostic_data_cleanup(result), encoding='utf-8')
         except OSError as exc:
             QMessageBox.critical(self, 'Export Diagnostic Report', str(exc))
             return
-        QMessageBox.information(self, 'Export Diagnostic Report', f'Report tersimpan: {path}')
+        QMessageBox.information(
+            self, 'Export Diagnostic Report',
+            'Diagnostic artifacts tersimpan:\n'
+            f'• Report: {path}\n'
+            f'• Data audit: {audit_path}\n'
+            f'• Data cleanup: {cleanup_path}\n\n'
+            'Cleanup hanya berisi DELETE untuk orphan ERROR 1452 dan tidak dieksekusi otomatis.'
+        )
