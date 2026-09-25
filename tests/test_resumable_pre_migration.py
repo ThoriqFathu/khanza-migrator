@@ -242,3 +242,18 @@ def test_clear_sessions_when_directory_does_not_exist(tmp_path):
     store = LocalSessionRepository(tmp_path / 'missing')
     store.clear_all()
     assert not store.root.exists()
+
+
+def test_pre_skip_fk_validation_prefixes_sql_without_changing_export(session_setup):
+    source, target, db, _, _, service = session_setup
+    session = service.start(source, target, '', foreign_key_checks=False)
+    completed = service.run(session.session_id, target, 'pw', foreign_key_checks=False)
+    assert all(
+        call.args[2].startswith('SET SESSION FOREIGN_KEY_CHECKS = 0;\n')
+        for call in db.execute.call_args_list
+    )
+    assert completed.foreign_key_checks is False
+    assert [s.sql for s in SqlMigrationParser().parse_file(service.output_file(completed))] == [
+        f'SELECT {i}' for i in range(1, 17)
+    ]
+    assert service.result(completed).foreign_key_checks is False

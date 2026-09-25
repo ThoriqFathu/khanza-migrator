@@ -17,6 +17,7 @@ from app.domains.migration.application.use_cases import (
 from app.domains.migration.domain.enums import Environment
 from app.domains.migration.domain.models import DatabaseConfig
 from app.shared.hashing.sha256 import sha256_file
+from .foreign_key_policy_dialog import ask_foreign_key_checks
 
 
 class FinalMigrationTab(QWidget):
@@ -247,6 +248,9 @@ class FinalMigrationTab(QWidget):
     def _execute_final(self):
         if not self._validate_final():
             return
+        foreign_key_checks = ask_foreign_key_checks(self, production=True)
+        if foreign_key_checks is None:
+            return
         confirmation = QMessageBox.warning(
             self,
             "EXECUTE PRODUCTION MIGRATION",
@@ -275,6 +279,7 @@ class FinalMigrationTab(QWidget):
                 self.final_password.text(),
                 self.last_backup,
                 progress,
+                foreign_key_checks=foreign_key_checks,
             ),
             self.final_log,
             None,
@@ -282,8 +287,10 @@ class FinalMigrationTab(QWidget):
         )
 
     def _final_finished(self, result):
+        mode = "ON" if result.foreign_key_checks else "SKIPPED"
+        self.final_log.appendPlainText(f"Foreign Key Validation: {mode}")
         if result.status.value == "SUCCESS":
-            self.final_status.setText("FINAL MIGRATION COMPLETED")
+            self.final_status.setText(f"FINAL MIGRATION COMPLETED — FK Validation: {mode}")
             QMessageBox.information(self, "Completed", "Final migration selesai.")
         else:
             self.final_status.setText("FINAL MIGRATION FAILED")

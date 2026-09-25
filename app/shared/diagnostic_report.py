@@ -27,7 +27,8 @@ def render_diagnostic_report(result: DiagnosticMigrationResult,
         '# Diagnostic Migration Report',
         _fence(f'Generated: {generated.isoformat()}\nStarted: {result.started_at.isoformat()}\n'
                f'Finished: {result.finished_at.isoformat()}\nEnvironment: TEST\n'
-               f'Database: {result.database}\nMigration: {result.migration_name}'),
+               f'Database: {result.database}\nMigration: {result.migration_name}\n'
+               f'Foreign Key Validation: {"ENABLED" if result.foreign_key_checks else "SKIPPED"}'),
         '## Summary',
         f'Total Statements: {result.total_statements}\n\nSuccess: {result.success_count}\n\n'
         f'Failed: {result.failure_count}\n\nUnattempted: {result.unattempted_count}\n\n'

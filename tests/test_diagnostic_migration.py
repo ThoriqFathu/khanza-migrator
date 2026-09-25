@@ -144,3 +144,18 @@ SELECT 3;
     assert [s.sql for s in result.statements] == session.pending
     session = resume.run(session.session_id, target, '')
     assert [(s.sequence, s.sql) for s in result.statements] == [(s.sequence, s.sql) for s in session.completed]
+
+
+def test_diagnostic_skip_fk_validation_prefixes_each_execution(tmp_path, target, db):
+    migration = tmp_path / 'migration.sql'
+    migration.write_text('SELECT 1; SELECT 2;')
+    service = DiagnosticMigration(SqlMigrationParser(), db)
+    result = service.execute(
+        migration, replace(target, environment=Environment.TEST), 'pw',
+        foreign_key_checks=False,
+    )
+    assert [c.args[2] for c in db.execute.call_args_list] == [
+        'SET SESSION FOREIGN_KEY_CHECKS = 0;\nSELECT 1',
+        'SET SESSION FOREIGN_KEY_CHECKS = 0;\nSELECT 2',
+    ]
+    assert result.foreign_key_checks is False

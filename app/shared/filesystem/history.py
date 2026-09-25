@@ -34,6 +34,7 @@ class LocalHistoryRepository:
             "finished_at": result.finished_at.isoformat(),
             "success_count": result.success_count,
             "failed_count": result.failed_count,
+            "foreign_key_checks": result.foreign_key_checks,
             "statements": [
                 {
                     "sequence": item.sequence,
@@ -56,6 +57,7 @@ class LocalHistoryRepository:
             "migration_hash": result.migration_hash,
             "database": result.database,
             "status": result.status.value,
+            "foreign_key_checks": result.foreign_key_checks,
             "backup": asdict(backup) if backup else None,
         }
         (folder / "metadata.json").write_text(

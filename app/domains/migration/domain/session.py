@@ -18,3 +18,4 @@ class PreMigrationSession:
     invalidated: bool = False
     finished_at: datetime | None = None
     output_hash: str | None = None
+    foreign_key_checks: bool = True

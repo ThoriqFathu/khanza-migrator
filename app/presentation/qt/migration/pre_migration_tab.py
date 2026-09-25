@@ -23,6 +23,7 @@ from app.domains.migration.application.migration_preflight import MigrationPrefl
 from app.domains.migration.domain.preflight import MigrationPreflightResult
 from .preflight_dialog import PreflightDialog, preflight_summary
 from .diagnostic_panel import DiagnosticPanel
+from .foreign_key_policy_dialog import ask_foreign_key_checks
 from app.domains.migration.application.diagnostic_migration import DiagnosticMigration
 
 
@@ -399,6 +400,9 @@ class PreMigrationTab(QWidget):
             )
             if answer != QMessageBox.Yes:
                 return
+        foreign_key_checks = ask_foreign_key_checks(self)
+        if foreign_key_checks is None:
+            return
         password = self.pre_password.text()
         backup = self.pre_backup.text()
         current_session = self.session
@@ -411,8 +415,13 @@ class PreMigrationTab(QWidget):
         def execute(progress: ProgressCallback) -> tuple[PreMigrationSession | None, str]:
             session = current_session
             try:
-                session = service.load(session_id) if session_id else service.start(migration, target, backup)
-                session = service.run(session.session_id, target, password, edited, progress)
+                session = service.load(session_id) if session_id else service.start(
+                    migration, target, backup, foreign_key_checks=foreign_key_checks
+                )
+                session = service.run(
+                    session.session_id, target, password, edited, progress,
+                    foreign_key_checks=foreign_key_checks,
+                )
                 return session, ""
             except Exception as exc:
                 if session:
@@ -439,7 +448,8 @@ class PreMigrationTab(QWidget):
                 self.pending_sql.setPlainText(render_statements(session.pending))
             self.session_status.setText(
                 f"Sesi: {self.pre_migration_service.checkpoint_file(session)}\n"
-                f"Berhasil: {len(session.completed)} | Belum selesai: {len(session.pending)}"
+                f"Berhasil: {len(session.completed)} | Belum selesai: {len(session.pending)}\n"
+                f"FK Validation: {'ON' if session.foreign_key_checks else 'SKIPPED'}"
             )
             if session.failed:
                 failed = session.failed

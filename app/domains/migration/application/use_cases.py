@@ -111,6 +111,7 @@ class RunMigrationUseCase:
         config: DatabaseConfig,
         password: str,
         progress: ProgressCallback | None = None,
+        *, foreign_key_checks: bool = True,
     ) -> MigrationExecutionResult:
         if not migration_file.is_file():
             raise FileNotFoundError(migration_file)
@@ -134,7 +135,10 @@ class RunMigrationUseCase:
             import time
             begin = time.perf_counter()
             try:
-                self.db.execute(config, password, statement.sql)
+                execution_sql = statement.sql if foreign_key_checks else (
+                    "SET SESSION FOREIGN_KEY_CHECKS = 0;\n" + statement.sql
+                )
+                self.db.execute(config, password, execution_sql)
                 results.append(
                     StatementResult(
                         sequence=statement.sequence,
@@ -166,6 +170,7 @@ class RunMigrationUseCase:
             started_at=started,
             finished_at=finished,
             statements=results,
+            foreign_key_checks=foreign_key_checks,
         )
         self.history.save_execution(result, migration_file)
         if progress:
@@ -291,12 +296,18 @@ class RunFinalMigrationUseCase:
         password: str,
         backup: BackupMetadata,
         progress: ProgressCallback | None = None,
+        *, foreign_key_checks: bool = True,
     ) -> MigrationExecutionResult:
         report = self.validator.execute(migration_file, target, password, backup)
         if not report.passed:
             failures = "\n".join(f"- {x.name}: {x.detail}" for x in report.checks if not x.passed)
             raise PermissionError(f"Final migration diblokir:\n{failures}")
 
+        if foreign_key_checks:
+            return self.run_migration.execute(
+                migration_file, target, password, progress
+            )
         return self.run_migration.execute(
-            migration_file, target, password, progress
+            migration_file, target, password, progress,
+            foreign_key_checks=False,
         )

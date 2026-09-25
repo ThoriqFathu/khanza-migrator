@@ -52,7 +52,8 @@ def test_execution_persistence_preserves_existing_schema(
         "database": "baseline_test",
         "started_at": "2026-01-02T10:00:00+00:00",
         "finished_at": "2026-01-02T10:01:00+00:00",
-        "success_count": 1, "failed_count": int(failed), "statements": expected_statements,
+        "success_count": 1, "failed_count": int(failed),
+        "foreign_key_checks": True, "statements": expected_statements,
     }
     expected_backup = None
     if with_backup:
@@ -66,7 +67,8 @@ def test_execution_persistence_preserves_existing_schema(
     assert json.loads((folder / "metadata.json").read_text(encoding="utf-8")) == {
         "migration_file": str(migration_file.resolve()),
         "migration_hash": execution.migration_hash, "database": "baseline_test",
-        "status": "FAILED" if failed else "SUCCESS", "backup": expected_backup,
+        "status": "FAILED" if failed else "SUCCESS",
+        "foreign_key_checks": True, "backup": expected_backup,
     }
 
 

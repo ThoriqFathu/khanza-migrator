@@ -14,6 +14,7 @@ from app.domains.migration.application.ports import ProgressCallback
 from app.domains.migration.domain.diagnostic import DiagnosticMigrationResult
 from app.domains.migration.domain.models import DatabaseConfig
 from app.shared.diagnostic_report import DIRTY_NOTE, render_diagnostic_report
+from .foreign_key_policy_dialog import ask_foreign_key_checks
 from app.shared.diagnostic_data_sql import (
     render_diagnostic_data_audit, render_diagnostic_data_cleanup,
 )
@@ -23,7 +24,8 @@ def diagnostic_summary(result: DiagnosticMigrationResult) -> str:
     status = 'Completed' if result.completed else 'Aborted'
     return (f'Diagnostic Migration {status}\nDatabase: {result.database} | Statements: {result.total_statements} | '
             f'Success: {result.success_count} | Failed: {result.failure_count} | '
-            f'Unattempted: {result.unattempted_count}')
+            f'Unattempted: {result.unattempted_count} | FK Validation: '
+            f'{"ON" if result.foreign_key_checks else "SKIPPED"}')
 
 
 class DiagnosticResultDialog(QDialog):
@@ -128,6 +130,9 @@ class DiagnosticPanel(QWidget):
         )
         if answer != QMessageBox.Yes:
             return
+        foreign_key_checks = ask_foreign_key_checks(self)
+        if foreign_key_checks is None:
+            return
         # Everything below passed to the worker is plain input/service, no QWidget.
         service = self.service
         self.started.emit(target)
@@ -140,7 +145,10 @@ class DiagnosticPanel(QWidget):
 
         def execute(progress: ProgressCallback) -> tuple[DiagnosticMigrationResult | None, str]:
             try:
-                return service.execute(migration, target, password, progress), ''
+                return service.execute(
+                    migration, target, password, progress,
+                    foreign_key_checks=foreign_key_checks,
+                ), ''
             except Exception as exc:
                 return None, diagnostic_error_text(exc, password)
 

@@ -321,3 +321,17 @@ def test_final_with_real_use_cases_does_not_pass_backup_to_history_baseline(
     result = use_case.execute(migration_file, target, "pw", backup)
     assert result.status is MigrationStatus.SUCCESS
     history.save_execution.assert_called_once_with(result, migration_file)
+
+
+def test_run_skip_fk_validation_prefixes_each_statement_in_same_execution(
+    migration_file: Path, target: DatabaseConfig, parser: Mock, db: Mock, history: Mock,
+) -> None:
+    result = RunMigrationUseCase(parser, db, history).execute(
+        migration_file, target, "password", foreign_key_checks=False,
+    )
+    assert [c.args[2] for c in db.execute.call_args_list] == [
+        f"SET SESSION FOREIGN_KEY_CHECKS = 0;\nSELECT {i}" for i in range(1, 4)
+    ]
+    assert result.foreign_key_checks is False
+    # History/report SQL remains the original migration SQL, not the execution prefix.
+    assert [item.sql for item in result.statements] == [f"SELECT {i}" for i in range(1, 4)]

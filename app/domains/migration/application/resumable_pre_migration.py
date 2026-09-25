@@ -23,14 +23,18 @@ class ResumablePreMigration:
         self.history = history
         self.sessions = sessions
 
-    def start(self, migration: Path, target: DatabaseConfig, test_backup: str) -> PreMigrationSession:
+    def start(self, migration: Path, target: DatabaseConfig, test_backup: str, *,
+              foreign_key_checks: bool = True) -> PreMigrationSession:
         if target.environment is not Environment.TEST:
             raise ValueError("Sesi pre-migration hanya untuk TEST.")
         pending = self._parse_pending(migration)
         if not pending:
             raise ValueError("Migration tidak berisi statement SQL.")
-        session = PreMigrationSession(uuid4().hex, str(migration.resolve()), test_backup,
-                                      target, datetime.now(timezone.utc), pending)
+        session = PreMigrationSession(
+            uuid4().hex, str(migration.resolve()), test_backup,
+            target, datetime.now(timezone.utc), pending,
+            foreign_key_checks=foreign_key_checks,
+        )
         self.sessions.save(session)
         return session
 
@@ -59,7 +63,8 @@ class ResumablePreMigration:
 
     def run(self, session_id: str, target: DatabaseConfig, password: str,
             edited_pending: str | None = None,
-            progress: ProgressCallback | None = None) -> PreMigrationSession:
+            progress: ProgressCallback | None = None, *,
+            foreign_key_checks: bool = True) -> PreMigrationSession:
         session = self.load(session_id)
         if target.environment is not Environment.TEST or target != session.target:
             raise ValueError("Lanjutkan hanya pada konfigurasi database TEST sesi yang sama.")
@@ -75,6 +80,11 @@ class ResumablePreMigration:
             if not pending:
                 raise ValueError("SQL yang belum selesai tidak boleh kosong.")
             session.pending = pending
+        if session.foreign_key_checks != foreign_key_checks:
+            raise ValueError(
+                "Mode Foreign Key Validation harus sama selama satu sesi PRE. "
+                "Reset/Restore TEST untuk memulai sesi dengan mode berbeda."
+            )
         self.sessions.save(session)
         self.db.test_connection(target, password)
         session.failed = None
@@ -90,7 +100,10 @@ class ResumablePreMigration:
             self.sessions.save(session)
             begin = perf_counter()
             try:
-                self.db.execute(target, password, sql)
+                execution_sql = sql if foreign_key_checks else (
+                    "SET SESSION FOREIGN_KEY_CHECKS = 0;\n" + sql
+                )
+                self.db.execute(target, password, execution_sql)
             except Exception as exc:
                 session.in_flight = False
                 session.failed = StatementResult(sequence, sql, False,
@@ -121,12 +134,14 @@ class ResumablePreMigration:
         if sha256_file(self.output_file(session)) != session.output_hash:
             raise ValueError("migration_final.sql berubah setelah pengujian.")
         return MigrationExecutionResult(MigrationStatus.SUCCESS, session.output_hash,
-            session.target.database, session.started_at, session.finished_at, list(session.completed))
+            session.target.database, session.started_at, session.finished_at, list(session.completed),
+            foreign_key_checks=session.foreign_key_checks)
 
     def _save_attempt(self, session: PreMigrationSession) -> None:
         path = self.sessions.write_sql(session.session_id, "attempt.sql", render_statements(
             [item.sql for item in session.completed] + session.pending))
         result = MigrationExecutionResult(MigrationStatus.FAILED, sha256_file(path), session.target.database,
             datetime.now(timezone.utc), datetime.now(timezone.utc),
-            [*session.completed, session.failed] if session.failed else list(session.completed))
+            [*session.completed, session.failed] if session.failed else list(session.completed),
+            foreign_key_checks=session.foreign_key_checks)
         self.history.save_execution(result, path)

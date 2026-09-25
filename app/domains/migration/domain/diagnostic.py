@@ -14,6 +14,7 @@ class DiagnosticMigrationResult:
     total_statements: int
     statements: list[StatementResult] = field(default_factory=list)
     fatal_error: str = ""
+    foreign_key_checks: bool = True
 
     @property
     def success_count(self) -> int:

@@ -40,6 +40,7 @@ class MigrationExecutionResult:
     started_at: datetime
     finished_at: datetime
     statements: list[StatementResult] = field(default_factory=list)
+    foreign_key_checks: bool = True
 
     @property
     def success_count(self) -> int:

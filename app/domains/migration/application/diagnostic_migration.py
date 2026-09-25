@@ -30,7 +30,8 @@ class DiagnosticMigration:
         self.db = db
 
     def execute(self, migration: Path, target: DatabaseConfig, password: str,
-                progress: ProgressCallback | None = None) -> DiagnosticMigrationResult:
+                progress: ProgressCallback | None = None, *,
+                foreign_key_checks: bool = True) -> DiagnosticMigrationResult:
         if target.environment is not Environment.TEST:
             raise ValueError("Diagnostic Migration hanya diizinkan pada environment TEST.")
         if not target.database:
@@ -51,7 +52,8 @@ class DiagnosticMigration:
 
         result = DiagnosticMigrationResult(started, started,
             redact_diagnostic_text(target.database, password),
-            redact_diagnostic_text(migration.name, password), len(statements))
+            redact_diagnostic_text(migration.name, password), len(statements),
+            foreign_key_checks=foreign_key_checks)
         for sequence, statement in enumerate(statements, 1):
             if progress:
                 progress(f"Diagnostic migration {sequence}/{len(statements)}", sequence - 1, len(statements))
@@ -60,8 +62,10 @@ class DiagnosticMigration:
             code = None
             success = False
             try:
-                # No rewrite, retry, FK-check override, or rollback.
-                self.db.execute(target, password, statement.sql)
+                sql = statement.sql if foreign_key_checks else (
+                    "SET SESSION FOREIGN_KEY_CHECKS = 0;\n" + statement.sql
+                )
+                self.db.execute(target, password, sql)
                 success = True
             except Exception as exc:
                 failure = diagnostic_error_text(exc, password)
